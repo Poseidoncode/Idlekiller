@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     widgets::{Block, Borders, Cell, Row, Table, Paragraph},
     Frame,
 };
@@ -37,9 +37,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect) {
-    let text = " IdleKiller - Find and Kill Inactive Processes ".bold().cyan();
+    let text = " IdleKiller - Find and Kill Inactive Processes ";
     let header = Paragraph::new(text)
         .block(Block::default().borders(Borders::ALL))
+        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
         .centered();
     f.render_widget(header, area);
 }
@@ -66,7 +67,7 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             name.to_string()
         };
-        Cell::from(text).style(Style::default().fg(Color::Yellow))
+        Cell::from(text).style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
     });
     let header = Row::new(header_cells)
         .style(Style::default().add_modifier(Modifier::BOLD))
@@ -77,11 +78,14 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         let is_idle = p.cpu < 0.1 && (p.status == "Sleeping" || p.status == "Idle");
         
         let style = if is_idle && p.mem_mb > 50.0 {
-            Style::default().fg(Color::Magenta)
+            // Idle + High Memory: Warning state (Yellow)
+            Style::default().fg(Color::Yellow)
         } else if is_idle {
-            Style::default().fg(Color::Blue)
+            // Idle + Low Memory: Normal but inactive (White)
+            Style::default().fg(Color::White)
         } else {
-            Style::default().fg(Color::Gray)
+            // Active process (Cyan)
+            Style::default().fg(Color::Cyan)
         };
 
         Row::new(vec![
@@ -104,7 +108,7 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
     ])
     .header(header)
     .block(Block::default().borders(Borders::ALL).title(" Processes (v/j=down, ^/k=up, s=search) "))
-    .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+    .row_highlight_style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
     .column_spacing(2);
 
     f.render_stateful_widget(table, area, &mut app.table_state);
@@ -119,6 +123,6 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
 
     let p = Paragraph::new(message)
         .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(Color::DarkGray));
+        .style(Style::default().fg(Color::White));
     f.render_widget(p, area);
 }
