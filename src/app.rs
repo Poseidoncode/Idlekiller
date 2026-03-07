@@ -209,22 +209,23 @@ impl App {
         use crate::ui::*;
         // Header starts at HEADER_AREA_HEIGHT + 1 (border height)
         if row == HEADER_AREA_HEIGHT + 1 { 
-            let fixed_width = COL_PID_WIDTH + COL_STATUS_WIDTH + COL_CPU_WIDTH + COL_MEM_WIDTH + COL_SEARCH_WIDTH + 2;
+            // fixed_width = 2 (borders) + total widths (53) + 5 gaps * 2 (spacing) = 65
+            let fixed_width = 65; 
             let name_width = if width > fixed_width { width - fixed_width } else { COL_NAME_MIN_WIDTH };
             
             let mut current_x = 1; // Left border
             
             let pid_end = current_x + COL_PID_WIDTH;
-            current_x = pid_end + 2;
+            current_x = pid_end + 2; // Including spacing
             
             let name_end = current_x + name_width;
-            current_x = name_end + 2;
+            current_x = name_end + 2; // Including spacing
             
             let status_end = current_x + COL_STATUS_WIDTH;
-            current_x = status_end + 2;
+            current_x = status_end + 2; // Including spacing
             
             let cpu_end = current_x + COL_CPU_WIDTH;
-            current_x = cpu_end + 2;
+            current_x = cpu_end + 2; // Including spacing
             
             let mem_end = current_x + COL_MEM_WIDTH;
             
