@@ -18,8 +18,8 @@ cd Idlekiller
 # 2. Build (requires Rust installed)
 cargo build --release
 
-# 3. Move executable to PATH or any folder
-copy target\release\idlekiller.exe C:\Program Files\Idlekiller\
+# 3. Move executable to your preferred folder (e.g., C:\Software\Idlekiller\)
+copy target\release\idlekiller.exe C:\Path\To\Your\Folder\
 ```
 
 ### macOS

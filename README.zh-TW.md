@@ -18,8 +18,8 @@ cd Idlekiller
 # 2. 編譯（需先安裝 Rust）
 cargo build --release
 
-# 3. 將執行檔移至 PATH 或任意資料夾
-copy target\release\idlekiller.exe C:\Program Files\Idlekiller\
+# 3. 將執行檔移至你偏好的資料夾 (例如 C:\Software\Idlekiller\)
+copy target\release\idlekiller.exe C:\妳想放的路徑\Idlekiller\
 ```
 
 ### macOS
