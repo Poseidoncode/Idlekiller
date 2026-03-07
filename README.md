@@ -71,6 +71,3 @@ Or directly click `Idlekiller.app` on macOS.
 
 ---
 
-## 📄 License
-
-MIT License

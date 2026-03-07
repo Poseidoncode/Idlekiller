@@ -70,7 +70,3 @@ idlekiller
 | **Q** / **Esc**       | 退出工具               |
 
 ---
-
-## 📄 授權
-
-MIT License
