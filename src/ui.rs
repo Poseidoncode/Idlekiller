@@ -142,6 +142,9 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         .height(TABLE_HEADER_HEIGHT)
         .bottom_margin(TABLE_MARGIN_BOTTOM);
 
+    // If searching, show the search query in the header area or a special row
+    // Here we'll show it in the footer area instead for a cleaner terminal look
+
     let rows: Vec<Row> = app.processes.iter().map(|p| {
         let is_idle = p.cpu < 0.1 && (p.status == "Sleeping" || p.status == "Idle");
         
@@ -183,14 +186,16 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
-    let message = if let Some(ref msg) = app.message {
-        format!(" {} | Controls: [q] Quit, [up/down] Nav, [s] Search, [Enter/x] Kill ", msg)
+    let message = if app.is_searching {
+        format!(" SEARCH: [{}_] | [Esc] Cancel, [Enter] Finish ", app.search_query)
+    } else if let Some(ref msg) = app.message {
+        format!(" {} | [f] Search, [K] Kill Wasteful, [q] Quit, [Enter/x] Kill ", msg)
     } else {
-        " Controls: [q] Quit, [up/down] Nav, [s] Search, [Enter/x] Kill Selected ".to_string()
+        " [f] Search, [K] Kill Wasteful, [q] Quit, [up/down] Nav, [Enter/x] Kill ".to_string()
     };
 
     let p = Paragraph::new(message)
         .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(Color::White));
+        .style(Style::default().fg(if app.is_searching { Color::Yellow } else { Color::White }));
     f.render_widget(p, area);
 }

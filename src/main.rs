@@ -58,13 +58,43 @@ where
 
         if crossterm::event::poll(timeout)? {
             match event::read()? {
-                Event::Key(key) => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-                    KeyCode::Down | KeyCode::Char('j') => app.next(),
-                    KeyCode::Up | KeyCode::Char('k') => app.previous(),
-                    KeyCode::Enter | KeyCode::Char('x') => app.kill_selected(),
-                    KeyCode::Char('s') => app.open_search(),
-                    _ => {}
+                Event::Key(key) => {
+                    if app.is_searching {
+                        match key.code {
+                            KeyCode::Enter => {
+                                app.is_searching = false;
+                            }
+                            KeyCode::Esc => {
+                                app.is_searching = false;
+                                app.search_query.clear();
+                                app.refresh();
+                            }
+                            KeyCode::Char(c) => {
+                                app.search_query.push(c);
+                                app.refresh();
+                            }
+                            KeyCode::Backspace => {
+                                app.search_query.pop();
+                                app.refresh();
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+                            KeyCode::Down | KeyCode::Char('j') => app.next(),
+                            KeyCode::Up | KeyCode::Char('k') => app.previous(),
+                            KeyCode::Enter | KeyCode::Char('x') => app.kill_selected(),
+                            KeyCode::Char('s') => app.open_search(),
+                            KeyCode::Char('f') | KeyCode::Char('/') => {
+                                app.is_searching = true;
+                            }
+                            KeyCode::Char('K') => {
+                                app.kill_all_wasteful();
+                            }
+                            _ => {}
+                        }
+                    }
                 },
                 Event::Mouse(mouse) => match mouse.kind {
                     event::MouseEventKind::ScrollDown => {
