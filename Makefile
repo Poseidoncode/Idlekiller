@@ -8,11 +8,11 @@ help:
 	@echo "可用指令："
 	@echo "  make         - 顯示此幫助資訊"
 	@echo "  make help    - 顯示此幫助資訊"
-	@echo "  make run     - 執行開發版直接運行"
+	@echo "  make run     - 執行開發版直接運行 (Windows/macOS/Linux)"
 	@echo "  make build   - 編譯開發版"
 	@echo "  make release - 編譯正式版（最佳化）"
 	@echo "  make clean   - 清除所有的編譯暫存檔"
-	@echo "  make app     - 編譯正式版並幫你打包成 macOS 的 Idlekiller.app"
+	@echo "  make app     - 編譯正式版並幫你打包成 macOS 的 Idlekiller.app (僅限 macOS)"
 
 # 執行開發版
 run:
