@@ -1,74 +1,76 @@
+[English](./README.md) | [繁體中文](./README.zh-TW.md)
+
 # Idlekiller
 
-一個基於 Rust 的 TUI 進程管理工具，專為識別與清理不必要消耗系統資源的進程而設計。
+A Rust-based TUI process management tool designed to identify and clean up unnecessary processes consuming system resources.
 
 ---
 
-## 1️⃣ 如何安裝
+## 1️⃣ Installation
 
 ### Windows
 
 ```powershell
-# 1. 下載並解壓縮釋出檔
+# 1. Download and extract release files
 git clone https://github.com/Poseidoncode/Idlekiller.git
 cd Idlekiller
 
-# 2. 編譯（需先安裝 Rust）
+# 2. Build (requires Rust installed)
 cargo build --release
 
-# 3. 將執行檔移至 PATH 或任意資料夾
+# 3. Move executable to PATH or any folder
 copy target\release\idlekiller.exe C:\Program Files\Idlekiller\
 ```
 
 ### macOS
 
 ```bash
-# 方式 A：從原始碼編譯
+# Method A: Build from source
 git clone https://github.com/Poseidoncode/Idlekiller.git
 cd Idlekiller
 cargo build --release
 sudo cp target/release/idlekiller /usr/local/bin/
 
-# 方式 B：打包成 .app（圖示啟動）
+# Method B: Package as .app (icon launcher)
 make app
-# 生成 Idlekiller.app，拖到 Applications 即可
+# Generates Idlekiller.app, drag to Applications folder
 ```
 
 ### Linux
 
 ```bash
-# 1. 從原始碼編譯
+# 1. Build from source
 git clone https://github.com/Poseidoncode/Idlekiller.git
 cd Idlekiller
 cargo build --release
 
-# 2. 安裝到系統路徑
+# 2. Install to system path
 sudo cp target/release/idlekiller /usr/local/bin/
 ```
 
 ---
 
-## 2️⃣ 如何使用
+## 2️⃣ Usage
 
-### 啟動程式
+### Launch the Program
 
 ```bash
 idlekiller
 ```
 
-或在 macOS 上直接點擊 `Idlekiller.app`。
+Or directly click `Idlekiller.app` on macOS.
 
-### 操作說明
+### Key Bindings
 
-| 按鍵                  | 功能                   |
-| --------------------- | ---------------------- |
-| ↑ / ↓ / **K** / **J** | 上下移動選擇進程       |
-| **Enter**             | 終止所選進程 (Kill)    |
-| **S**                 | 在瀏覽器搜尋該進程資訊 |
-| **Q** / **Esc**       | 退出工具               |
+| Key                   | Function                          |
+| --------------------- | --------------------------------- |
+| ↑ / ↓ / **K** / **J** | Move up/down to select process    |
+| **Enter**             | Terminate selected process (Kill) |
+| **S**                 | Search process info in browser    |
+| **Q** / **Esc**       | Exit the tool                     |
 
 ---
 
-## 📄 授權
+## 📄 License
 
 MIT License
