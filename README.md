@@ -62,10 +62,10 @@ Or directly click `Idlekiller.app` on macOS.
 
 ### Key Bindings
 
-| Key                   | Function                          |
-| --------------------- | --------------------------------- |
 | ↑ / ↓ / **K** / **J** | Move up/down to select process    |
-| **Enter**             | Terminate selected process (Kill) |
+| **Enter** / **X**     | Terminate selected process (Kill) |
+| **f** / **/**         | Filter processes by name (In-app) |
+| **Shift + K**         | One-click Clean Wasteful Processes|
 | **S**                 | Search process info in browser    |
 | **Q** / **Esc**       | Exit the tool                     |
 
