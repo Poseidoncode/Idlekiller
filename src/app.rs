@@ -44,6 +44,8 @@ pub struct App {
     pub sort_direction: SortDirection,
     pub system_stats: SystemStats,
     pub boot_time: SystemTime,
+    pub is_searching: bool,
+    pub search_query: String,
 }
 
 impl Default for App {
@@ -78,6 +80,8 @@ impl App {
                 uptime_seconds: 0,
             },
             boot_time,
+            is_searching: false,
+            search_query: String::new(),
         };
         
         // populate initial data immediately
@@ -101,11 +105,15 @@ impl App {
         self.update_system_stats();
         
         let mut new_processes = Vec::new();
+        let search_pattern = self.search_query.to_lowercase();
 
         for (pid, process) in self.sys.processes() {
-            // Allow all processes to be listed just like Activity Monitor
-            // Note: killing root processes will fail unless run with sudo
-
+            let name = process.name().to_string_lossy().to_string();
+            
+            // Filter by search query if present
+            if !search_pattern.is_empty() && !name.to_lowercase().contains(&search_pattern) {
+                continue;
+            }
             let cpu = process.cpu_usage();
             let status = match process.status() {
                 ProcessStatus::Run => "Running",
@@ -121,7 +129,7 @@ impl App {
             
             new_processes.push(ProcessInfo {
                 pid: *pid,
-                name: process.name().to_string_lossy().to_string(),
+                name,
                 cpu,
                 mem_mb,
                 status: status.to_string(),
@@ -318,6 +326,39 @@ impl App {
                 }
                 self.refresh();
             }
+        }
+    }
+
+    pub fn kill_all_wasteful(&mut self) {
+        let mut killed_count = 0;
+        let mut targets = Vec::new();
+
+        // Identify wasteful processes first to avoid borrow checker issues with sys.processes()
+        for (pid, process) in self.sys.processes() {
+            let cpu = process.cpu_usage();
+            let status = process.status();
+            let mem_mb = process.memory() as f64 / 1024.0 / 1024.0;
+            
+            let is_idle = cpu < 0.1 && (status == ProcessStatus::Sleep || status == ProcessStatus::Idle);
+            if is_idle && mem_mb > 50.0 {
+                targets.push((*pid, process.name().to_string_lossy().to_string()));
+            }
+        }
+
+        for (pid, _name) in targets {
+            if let Some(process) = self.sys.process(pid) {
+                if process.kill() {
+                    killed_count += 1;
+                }
+            }
+        }
+
+        if killed_count > 0 {
+            self.message = Some(format!("Cleaned up {} wasteful processes", killed_count));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            self.refresh();
+        } else {
+            self.message = Some("No wasteful processes found to clean up".to_string());
         }
     }
 }
