@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::time::{Duration, SystemTime};
 use sysinfo::{Pid, ProcessStatus};
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -24,6 +25,13 @@ pub struct ProcessInfo {
     pub status: String,
 }
 
+pub struct SystemStats {
+    pub cpu_usage: f32,
+    pub ram_used_mb: f64,
+    pub ram_total_mb: f64,
+    pub uptime_seconds: u64,
+}
+
 use ratatui::widgets::TableState;
 
 pub struct App {
@@ -34,6 +42,8 @@ pub struct App {
     pub message: Option<String>,
     pub sort_column: SortColumn,
     pub sort_direction: SortDirection,
+    pub system_stats: SystemStats,
+    pub boot_time: SystemTime,
 }
 
 impl Default for App {
@@ -50,7 +60,10 @@ impl App {
         let mut table_state = TableState::default();
         table_state.select(Some(0));
 
-        Self {
+        // Get boot time for uptime calculation
+        let boot_time = SystemTime::UNIX_EPOCH + Duration::from_secs(sysinfo::System::boot_time());
+        
+        let mut app = Self {
             sys,
             processes: Vec::new(),
             table_state,
@@ -58,12 +71,34 @@ impl App {
             message: None,
             sort_column: SortColumn::Memory,
             sort_direction: SortDirection::Desc,
-        }
+            system_stats: SystemStats {
+                cpu_usage: 0.0,
+                ram_used_mb: 0.0,
+                ram_total_mb: 0.0,
+                uptime_seconds: 0,
+            },
+            boot_time,
+        };
+        
+        // populate initial data immediately
+        app.refresh();
+        // second refresh to get CPU usage (sysinfo needs time delta between refreshes)
+        // give it a tiny sleep to allow sysinfo to record a delta
+        std::thread::sleep(Duration::from_millis(100));
+        app.refresh();
+        app
     }
 
     pub fn refresh(&mut self) {
-        // Refresh processes
-        self.sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::everything());
+        // refresh processes with specific kind (include CPU usage for processes)
+        self.sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::everything()
+        );
+        
+        // Update system stats
+        self.update_system_stats();
         
         let mut new_processes = Vec::new();
 
@@ -116,6 +151,7 @@ impl App {
             }
         });
 
+        // remove redundant second update call
         self.processes = new_processes;
 
         // ensure selected is in bounds
@@ -131,6 +167,28 @@ impl App {
         } else {
             self.table_state.select(None);
         }
+    }
+
+    fn update_system_stats(&mut self) {
+        // Refresh CPU and memory info
+        self.sys.refresh_cpu_usage();
+        self.sys.refresh_memory();
+
+        let cpu_usage = self.sys.global_cpu_usage();
+        let ram_total = self.sys.total_memory() as f64 / 1024.0 / 1024.0;
+        let ram_used = self.sys.used_memory() as f64 / 1024.0 / 1024.0;
+
+        // Calculate uptime from boot time
+        let now = SystemTime::now();
+        let duration = now.duration_since(self.boot_time).unwrap_or(Duration::ZERO);
+        let uptime_seconds = duration.as_secs();
+
+        self.system_stats = SystemStats {
+            cpu_usage,
+            ram_used_mb: ram_used,
+            ram_total_mb: ram_total,
+            uptime_seconds,
+        };
     }
 
     pub fn next(&mut self) {
@@ -207,10 +265,15 @@ impl App {
 
     pub fn handle_click(&mut self, col: u16, row: u16, width: u16) {
         use crate::ui::*;
-        // Header starts at HEADER_AREA_HEIGHT + 1 (border height)
-        if row == HEADER_AREA_HEIGHT + 1 { 
-            // fixed_width = 2 (borders) + total widths (53) + 5 gaps * 2 (spacing) = 65
-            let fixed_width = 65; 
+        // Layout adjusted:
+        // chunks[0]: HEADER (height 2) -> y: 0, 1
+        // chunks[1]: STATS (height 3)  -> y: 2, 3, 4
+        // chunks[2]: TABLE (y: 5+)
+        //   Table border: row 5
+        //   Table content / header: row 6 
+        if row == 6 { 
+            // Header: check mouse x coordinate
+            let fixed_width = 8 + 12 + 10 + 15 + 8 + (2 * 5); // PID+Status+CPU+Mem+Search + 5 separators
             let name_width = if width > fixed_width { width - fixed_width } else { COL_NAME_MIN_WIDTH };
             
             let mut current_x = 1; // Left border
