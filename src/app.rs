@@ -36,6 +36,12 @@ pub struct App {
     pub sort_direction: SortDirection,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         let mut sys = sysinfo::System::new_all();
@@ -97,9 +103,16 @@ impl App {
                 SortColumn::Memory => a.mem_mb.partial_cmp(&b.mem_mb).unwrap_or(Ordering::Equal),
             };
 
+            // If same value, use PID as secondary sort key for stability
+            let final_ordering = if ordering == Ordering::Equal {
+                a.pid.as_u32().cmp(&b.pid.as_u32())
+            } else {
+                ordering
+            };
+
             match self.sort_direction {
-                SortDirection::Asc => ordering,
-                SortDirection::Desc => ordering.reverse(),
+                SortDirection::Asc => final_ordering,
+                SortDirection::Desc => final_ordering.reverse(),
             }
         });
 
@@ -149,60 +162,71 @@ impl App {
     }
 
     pub fn kill_selected(&mut self) {
-        if self.processes.is_empty() {
-            return;
-        }
-        
-        if let Some(selected) = self.table_state.selected() {
-            if let Some(target) = self.processes.get(selected) {
-                if let Some(process) = self.sys.process(target.pid) {
-                    let killed = process.kill();
-                    if killed {
-                        self.message = Some(format!("Killed process {} ({})", target.name, target.pid));
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        self.refresh();
-                    } else {
-                        self.message = Some(format!("Failed to kill process {} ({})", target.name, target.pid));
-                    }
-                }
+        if let Some(target) = self.table_state.selected().and_then(|i| self.processes.get(i))
+            && let Some(process) = self.sys.process(target.pid)
+        {
+            let killed = process.kill();
+            if killed {
+                self.message = Some(format!("Killed process {} ({})", target.name, target.pid));
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                self.refresh();
+            } else {
+                // On macOS, kill status is a bool. If false, it's likely a permission issue
+                // or the process ended just before.
+                self.message = Some(format!("Failed to kill process {} ({}). Try running with sudo?", target.name, target.pid));
             }
         }
     }
 
     pub fn open_search(&mut self) {
-        if let Some(selected) = self.table_state.selected() {
-            if let Some(target) = self.processes.get(selected) {
-                let query = target.name.replace(" ", "+");
-                let url = format!("https://www.google.com/search?q={}+process+mac", query);
-                if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
-                    self.message = Some(format!("Failed to open browser: {}", e));
-                } else {
-                    self.message = Some(format!("Searching for process: {}", target.name));
-                }
+        if let Some(target) = self.table_state.selected().and_then(|i| self.processes.get(i)) {
+            let query = urlencoding::encode(&target.name);
+            
+            let (os_cmd, os_args, os_tag) = if cfg!(target_os = "windows") {
+                ("cmd", vec!["/C", "start"], "windows")
+            } else if cfg!(target_os = "macos") {
+                ("open", vec![], "mac")
+            } else {
+                ("xdg-open", vec![], "linux")
+            };
+
+            let url = format!("https://www.google.com/search?q={}+process+{}", query, os_tag);
+            
+            let mut cmd = std::process::Command::new(os_cmd);
+            for arg in os_args {
+                cmd.arg(arg);
+            }
+            
+            if let Err(e) = cmd.arg(&url).spawn() {
+                self.message = Some(format!("Failed to open browser: {}", e));
+            } else {
+                self.message = Some(format!("Searching for process: {}", target.name));
             }
         }
     }
 
     pub fn handle_click(&mut self, col: u16, row: u16, width: u16) {
-        if row == 4 { // Header is typically at row 4
-            let fixed_width = 8 + 12 + 10 + 15 + 8 + 10 + 2;
-            let name_width = if width > fixed_width { width - fixed_width } else { 20 };
+        use crate::ui::*;
+        // Header starts at HEADER_AREA_HEIGHT + 1 (border height)
+        if row == HEADER_AREA_HEIGHT + 1 { 
+            let fixed_width = COL_PID_WIDTH + COL_STATUS_WIDTH + COL_CPU_WIDTH + COL_MEM_WIDTH + COL_SEARCH_WIDTH + 2;
+            let name_width = if width > fixed_width { width - fixed_width } else { COL_NAME_MIN_WIDTH };
             
             let mut current_x = 1; // Left border
             
-            let pid_end = current_x + 8;
+            let pid_end = current_x + COL_PID_WIDTH;
             current_x = pid_end + 2;
             
             let name_end = current_x + name_width;
             current_x = name_end + 2;
             
-            let status_end = current_x + 12;
+            let status_end = current_x + COL_STATUS_WIDTH;
             current_x = status_end + 2;
             
-            let cpu_end = current_x + 10;
+            let cpu_end = current_x + COL_CPU_WIDTH;
             current_x = cpu_end + 2;
             
-            let mem_end = current_x + 15;
+            let mem_end = current_x + COL_MEM_WIDTH;
             
             let clicked_col = if col >= 1 && col < pid_end {
                 Some(SortColumn::Pid)

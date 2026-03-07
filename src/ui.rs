@@ -5,13 +5,25 @@ use ratatui::{
     Frame,
 };
 use crate::app::App;
+ 
+pub const HEADER_AREA_HEIGHT: u16 = 3;
+pub const TABLE_HEADER_HEIGHT: u16 = 1;
+pub const TABLE_MARGIN_BOTTOM: u16 = 1;
+
+// Column constraints
+pub const COL_PID_WIDTH: u16 = 8;
+pub const COL_NAME_MIN_WIDTH: u16 = 20;
+pub const COL_STATUS_WIDTH: u16 = 12;
+pub const COL_CPU_WIDTH: u16 = 10;
+pub const COL_MEM_WIDTH: u16 = 15;
+pub const COL_SEARCH_WIDTH: u16 = 8;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Length(3),
+                Constraint::Length(HEADER_AREA_HEIGHT),
                 Constraint::Min(10),
                 Constraint::Length(3),
             ]
@@ -58,8 +70,8 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
     });
     let header = Row::new(header_cells)
         .style(Style::default().add_modifier(Modifier::BOLD))
-        .height(1)
-        .bottom_margin(1);
+        .height(TABLE_HEADER_HEIGHT)
+        .bottom_margin(TABLE_MARGIN_BOTTOM);
 
     let rows: Vec<Row> = app.processes.iter().map(|p| {
         let is_idle = p.cpu < 0.1 && (p.status == "Sleeping" || p.status == "Idle");
@@ -83,12 +95,12 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
     }).collect();
 
     let table = Table::new(rows, [
-        Constraint::Length(8),
-        Constraint::Min(20),
-        Constraint::Length(12),
-        Constraint::Length(10),
-        Constraint::Length(15),
-        Constraint::Length(8),
+        Constraint::Length(COL_PID_WIDTH),
+        Constraint::Min(COL_NAME_MIN_WIDTH),
+        Constraint::Length(COL_STATUS_WIDTH),
+        Constraint::Length(COL_CPU_WIDTH),
+        Constraint::Length(COL_MEM_WIDTH),
+        Constraint::Length(COL_SEARCH_WIDTH),
     ])
     .header(header)
     .block(Block::default().borders(Borders::ALL).title(" Processes (v/j=down, ^/k=up, s=search) "))
