@@ -17,7 +17,6 @@ pub const COL_NAME_MIN_WIDTH: u16 = 20;
 pub const COL_STATUS_WIDTH: u16 = 12;
 pub const COL_CPU_WIDTH: u16 = 10;
 pub const COL_MEM_WIDTH: u16 = 15;
-pub const COL_SEARCH_WIDTH: u16 = 8;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -63,11 +62,7 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     // CPU Usage Gauge
-    let cpu_display = if stats.cpu_usage.is_nan() || stats.cpu_usage.is_infinite() {
-        0.0
-    } else {
-        stats.cpu_usage
-    };
+    let cpu_display = stats.cpu_usage;
     let cpu_gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(" CPU USAGE "))
         .gauge_style(Style::default().fg(if cpu_display > 80.0 { Color::Red } else if cpu_display > 50.0 { Color::Yellow } else { Color::Cyan }))
@@ -75,16 +70,8 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
         .label(format!("{}%", cpu_display));
 
     // RAM Usage Gauge
-    let ram_display_used = if stats.ram_used_mb.is_nan() || stats.ram_used_mb.is_infinite() {
-        0.0
-    } else {
-        stats.ram_used_mb
-    };
-    let ram_display_total = if stats.ram_total_mb.is_nan() || stats.ram_total_mb.is_infinite() {
-        1.0
-    } else {
-        stats.ram_total_mb
-    };
+    let ram_display_used = stats.ram_used_mb;
+    let ram_display_total = stats.ram_total_mb;
     let ram_percent = if ram_display_total > 0.0 {
         ((ram_display_used / ram_display_total * 100.0) as u16).min(100)
     } else {
@@ -120,13 +107,10 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         ("Status", crate::app::SortColumn::Status),
         ("CPU (%)", crate::app::SortColumn::Cpu),
         ("Memory (MB)", crate::app::SortColumn::Memory),
-        ("Search", crate::app::SortColumn::Pid),
     ]
     .into_iter()
     .map(|(name, col)| {
-        let text = if name == "Search" {
-            name.to_string()
-        } else if app.sort_column == col {
+        let text = if app.sort_column == col {
             let indicator = match app.sort_direction {
                 crate::app::SortDirection::Asc => "▲",
                 crate::app::SortDirection::Desc => "▼",
@@ -165,7 +149,6 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
             Cell::from(p.status.clone()),
             Cell::from(format!("{:.1}%", p.cpu)),
             Cell::from(format!("{:.1} MB", p.mem_mb)),
-            Cell::from("🔍 [s]"),
         ]).style(style)
     }).collect();
 
@@ -175,7 +158,6 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(COL_STATUS_WIDTH),
         Constraint::Length(COL_CPU_WIDTH),
         Constraint::Length(COL_MEM_WIDTH),
-        Constraint::Length(COL_SEARCH_WIDTH),
     ])
     .header(header)
     .block(Block::default().borders(Borders::ALL).title(" Processes (v/j=down, ^/k=up, s=search) "))

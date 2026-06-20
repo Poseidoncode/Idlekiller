@@ -248,7 +248,7 @@ impl App {
 
     pub fn open_search(&mut self) {
         if let Some(target) = self.table_state.selected().and_then(|i| self.processes.get(i)) {
-            let query = urlencoding::encode(&target.name);
+            let query = target.name.replace(' ', "+");
             
             let (os_cmd, os_args, os_tag) = if cfg!(target_os = "windows") {
                 ("cmd", vec!["/C", "start"], "windows")
@@ -273,63 +273,6 @@ impl App {
         }
     }
 
-    pub fn handle_click(&mut self, col: u16, row: u16, width: u16) {
-        use crate::ui::*;
-        // Layout adjusted:
-        // chunks[0]: HEADER (height 2) -> y: 0, 1
-        // chunks[1]: STATS (height 3)  -> y: 2, 3, 4
-        // chunks[2]: TABLE (y: 5+)
-        //   Table border: row 5
-        //   Table content / header: row 6 
-        if row == 6 { 
-            // Header: check mouse x coordinate
-            let fixed_width = 8 + 12 + 10 + 15 + 8 + (2 * 5); // PID+Status+CPU+Mem+Search + 5 separators
-            let name_width = if width > fixed_width { width - fixed_width } else { COL_NAME_MIN_WIDTH };
-            
-            let mut current_x = 1; // Left border
-            
-            let pid_end = current_x + COL_PID_WIDTH;
-            current_x = pid_end + 2; // Including spacing
-            
-            let name_end = current_x + name_width;
-            current_x = name_end + 2; // Including spacing
-            
-            let status_end = current_x + COL_STATUS_WIDTH;
-            current_x = status_end + 2; // Including spacing
-            
-            let cpu_end = current_x + COL_CPU_WIDTH;
-            current_x = cpu_end + 2; // Including spacing
-            
-            let mem_end = current_x + COL_MEM_WIDTH;
-            
-            let clicked_col = if col >= 1 && col < pid_end {
-                Some(SortColumn::Pid)
-            } else if col >= pid_end + 2 && col < name_end {
-                Some(SortColumn::Name)
-            } else if col >= name_end + 2 && col < status_end {
-                Some(SortColumn::Status)
-            } else if col >= status_end + 2 && col < cpu_end {
-                Some(SortColumn::Cpu)
-            } else if col >= cpu_end + 2 && col < mem_end {
-                Some(SortColumn::Memory)
-            } else {
-                None
-            };
-
-            if let Some(c) = clicked_col {
-                if self.sort_column == c {
-                    self.sort_direction = match self.sort_direction {
-                        SortDirection::Asc => SortDirection::Desc,
-                        SortDirection::Desc => SortDirection::Asc,
-                    };
-                } else {
-                    self.sort_column = c;
-                    self.sort_direction = SortDirection::Desc;
-                }
-                self.refresh();
-            }
-        }
-    }
 
     pub fn kill_all_wasteful(&mut self) {
         let mut killed_count = 0;
