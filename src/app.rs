@@ -17,6 +17,7 @@ pub enum SortDirection {
     Desc,
 }
 
+#[derive(Clone)]
 pub struct ProcessInfo {
     pub pid: Pid,
     pub name: String,
@@ -37,6 +38,7 @@ use ratatui::widgets::TableState;
 pub struct App {
     sys: sysinfo::System,
     pub processes: Vec<ProcessInfo>,
+    all_processes: Vec<ProcessInfo>,
     pub table_state: TableState,
     pub should_quit: bool,
     pub message: Option<String>,
@@ -68,6 +70,7 @@ impl App {
         let mut app = Self {
             sys,
             processes: Vec::new(),
+            all_processes: Vec::new(),
             table_state,
             should_quit: false,
             message: None,
@@ -93,51 +96,46 @@ impl App {
         app
     }
 
-    pub fn refresh(&mut self) {
-        // refresh processes with specific kind (include CPU usage for processes)
+    /// Fetch process data from OS (heavy I/O)
+    fn refresh_data(&mut self) {
         self.sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
-            sysinfo::ProcessRefreshKind::everything()
+            // ponytail: only cpu+mem, skip disk/user/tasks/env etc
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory()
+                .without_tasks()
         );
-        
-        // Update system stats
         self.update_system_stats();
-        
-        let mut new_processes = Vec::new();
+
+        self.all_processes = self.sys.processes().iter().map(|(pid, process)| {
+            ProcessInfo {
+                pid: *pid,
+                name: process.name().to_string_lossy().to_string(),
+                cpu: process.cpu_usage(),
+                mem_mb: process.memory() as f64 / 1024.0 / 1024.0,
+                status: match process.status() {
+                    ProcessStatus::Run => "Running",
+                    ProcessStatus::Sleep => "Sleeping",
+                    ProcessStatus::Stop => "Stopped",
+                    ProcessStatus::Zombie => "Zombie",
+                    ProcessStatus::Idle => "Idle",
+                    _ => "Other",
+                }.to_string(),
+            }
+        }).collect();
+    }
+
+    /// Filter + sort from all_processes (in-memory, no I/O)
+    pub fn apply_filter(&mut self) {
         let search_pattern = self.search_query.to_lowercase();
 
-        for (pid, process) in self.sys.processes() {
-            let name = process.name().to_string_lossy().to_string();
-            
-            // Filter by search query if present
-            if !search_pattern.is_empty() && !name.to_lowercase().contains(&search_pattern) {
-                continue;
-            }
-            let cpu = process.cpu_usage();
-            let status = match process.status() {
-                ProcessStatus::Run => "Running",
-                ProcessStatus::Sleep => "Sleeping",
-                ProcessStatus::Stop => "Stopped",
-                ProcessStatus::Zombie => "Zombie",
-                ProcessStatus::Idle => "Idle",
-                _ => "Other",
-            };
+        self.processes = self.all_processes.iter().filter(|p| {
+            search_pattern.is_empty() || p.name.to_lowercase().contains(&search_pattern)
+        }).cloned().collect();
 
-            // Calculate memory in MB
-            let mem_mb = process.memory() as f64 / 1024.0 / 1024.0;
-            
-            new_processes.push(ProcessInfo {
-                pid: *pid,
-                name,
-                cpu,
-                mem_mb,
-                status: status.to_string(),
-            });
-        }
-
-        // Sort processes based on the current column and direction
-        new_processes.sort_by(|a, b| {
+        self.processes.sort_by(|a, b| {
             let ordering = match self.sort_column {
                 SortColumn::Pid => a.pid.as_u32().cmp(&b.pid.as_u32()),
                 SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
@@ -145,24 +143,17 @@ impl App {
                 SortColumn::Cpu => a.cpu.partial_cmp(&b.cpu).unwrap_or(Ordering::Equal),
                 SortColumn::Memory => a.mem_mb.partial_cmp(&b.mem_mb).unwrap_or(Ordering::Equal),
             };
-
-            // If same value, use PID as secondary sort key for stability
             let final_ordering = if ordering == Ordering::Equal {
                 a.pid.as_u32().cmp(&b.pid.as_u32())
             } else {
                 ordering
             };
-
             match self.sort_direction {
                 SortDirection::Asc => final_ordering,
                 SortDirection::Desc => final_ordering.reverse(),
             }
         });
 
-        // remove redundant second update call
-        self.processes = new_processes;
-
-        // ensure selected is in bounds
         let len = self.processes.len();
         if len > 0 {
             if let Some(selected) = self.table_state.selected() {
@@ -175,6 +166,11 @@ impl App {
         } else {
             self.table_state.select(None);
         }
+    }
+
+    pub fn refresh(&mut self) {
+        self.refresh_data();
+        self.apply_filter();
     }
 
     fn update_system_stats(&mut self) {
@@ -200,10 +196,13 @@ impl App {
     }
 
     pub fn next(&mut self) {
+        if self.processes.is_empty() {
+            return;
+        }
         let i = match self.table_state.selected() {
             Some(i) => {
                 if i >= self.processes.len().saturating_sub(1) {
-                    0
+                    i // stop at last
                 } else {
                     i + 1
                 }
@@ -214,10 +213,13 @@ impl App {
     }
 
     pub fn previous(&mut self) {
+        if self.processes.is_empty() {
+            return;
+        }
         let i = match self.table_state.selected() {
             Some(i) => {
                 if i == 0 {
-                    self.processes.len().saturating_sub(1)
+                    0 // stop at first
                 } else {
                     i - 1
                 }
@@ -346,10 +348,8 @@ impl App {
         }
 
         for (pid, _name) in targets {
-            if let Some(process) = self.sys.process(pid) {
-                if process.kill() {
-                    killed_count += 1;
-                }
+            if let Some(process) = self.sys.process(pid) && process.kill() {
+                killed_count += 1;
             }
         }
 

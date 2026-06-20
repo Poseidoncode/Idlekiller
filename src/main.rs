@@ -67,15 +67,15 @@ where
                             KeyCode::Esc => {
                                 app.is_searching = false;
                                 app.search_query.clear();
-                                app.refresh();
+                                app.apply_filter();
                             }
                             KeyCode::Char(c) => {
                                 app.search_query.push(c);
-                                app.refresh();
+                                app.apply_filter();
                             }
                             KeyCode::Backspace => {
                                 app.search_query.pop();
-                                app.refresh();
+                                app.apply_filter();
                             }
                             _ => {}
                         }
