@@ -2,6 +2,10 @@ use std::cmp::Ordering;
 use std::time::{Duration, SystemTime};
 use sysinfo::{Pid, ProcessStatus};
 
+// ponytail: named thresholds instead of raw magic numbers
+pub(crate) const IDLE_CPU_THRESHOLD: f32 = 0.1;
+pub(crate) const WASTEFUL_MEM_MB: f64 = 50.0;
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum SortColumn {
     Pid,
@@ -17,7 +21,7 @@ pub enum SortDirection {
     Desc,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProcessInfo {
     pub pid: Pid,
     pub name: String,
@@ -26,6 +30,7 @@ pub struct ProcessInfo {
     pub status: String,
 }
 
+#[derive(Debug)]
 pub struct SystemStats {
     pub cpu_usage: f32,
     pub ram_used_mb: f64,
@@ -48,6 +53,7 @@ pub struct App {
     pub boot_time: SystemTime,
     pub is_searching: bool,
     pub search_query: String,
+    pub dirty: bool,
 }
 
 impl Default for App {
@@ -58,14 +64,19 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
-        let mut sys = sysinfo::System::new_all();
-        sys.refresh_all();
+        let sys = sysinfo::System::new_all();
         
         let mut table_state = TableState::default();
         table_state.select(Some(0));
 
         // Get boot time for uptime calculation
-        let boot_time = SystemTime::UNIX_EPOCH + Duration::from_secs(sysinfo::System::boot_time());
+        let boot_secs = sysinfo::System::boot_time();
+        let boot_time = if boot_secs > 0 {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(boot_secs)
+        } else {
+            // ponytail: fail-safe — fall back to now instead of 1970-era nonsense
+            SystemTime::now()
+        };
         
         let mut app = Self {
             sys,
@@ -83,6 +94,7 @@ impl App {
                 uptime_seconds: 0,
             },
             boot_time,
+            dirty: true,
             is_searching: false,
             search_query: String::new(),
         };
@@ -91,7 +103,9 @@ impl App {
         app.refresh();
         // second refresh to get CPU usage (sysinfo needs time delta between refreshes)
         // give it a tiny sleep to allow sysinfo to record a delta
-        std::thread::sleep(Duration::from_millis(100));
+        // ponytail: named constant for CPU delta sleep
+        const CPU_DELTA_SLEEP_MS: u64 = 100;
+        std::thread::sleep(Duration::from_millis(CPU_DELTA_SLEEP_MS));
         app.refresh();
         app
     }
@@ -131,16 +145,18 @@ impl App {
 
     /// Filter + sort from all_processes (in-memory, no I/O)
     pub fn apply_filter(&mut self) {
-        let search_pattern = self.search_query.to_lowercase();
+        self.dirty = true;
+        // ponytail: process names are always ASCII on all major OS kernels
+        let search_pattern = self.search_query.to_ascii_lowercase();
 
         self.processes = self.all_processes.iter().filter(|p| {
-            search_pattern.is_empty() || p.name.to_lowercase().contains(&search_pattern)
+            search_pattern.is_empty() || p.name.to_ascii_lowercase().contains(&search_pattern)
         }).cloned().collect();
 
         self.processes.sort_by(|a, b| {
             let ordering = match self.sort_column {
                 SortColumn::Pid => a.pid.as_u32().cmp(&b.pid.as_u32()),
-                SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortColumn::Name => a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()),
                 SortColumn::Status => a.status.cmp(&b.status),
                 SortColumn::Cpu => a.cpu.partial_cmp(&b.cpu).unwrap_or(Ordering::Equal),
                 SortColumn::Memory => a.mem_mb.partial_cmp(&b.mem_mb).unwrap_or(Ordering::Equal),
@@ -171,6 +187,7 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
+        self.dirty = true;
         self.message = None;
         self.refresh_data();
         self.apply_filter();
@@ -202,6 +219,7 @@ impl App {
         if self.processes.is_empty() {
             return;
         }
+        self.dirty = true;
         let i = match self.table_state.selected() {
             Some(i) => {
                 if i >= self.processes.len().saturating_sub(1) {
@@ -219,6 +237,7 @@ impl App {
         if self.processes.is_empty() {
             return;
         }
+        self.dirty = true;
         let i = match self.table_state.selected() {
             Some(i) => {
                 if i == 0 {
@@ -233,6 +252,7 @@ impl App {
     }
 
     pub fn kill_selected(&mut self) {
+        self.dirty = true;
         if let Some(target) = self.table_state.selected().and_then(|i| self.processes.get(i))
             && let Some(process) = self.sys.process(target.pid)
         {
@@ -256,6 +276,7 @@ impl App {
 
     pub fn open_search(&mut self) {
         if let Some(target) = self.table_state.selected().and_then(|i| self.processes.get(i)) {
+            self.dirty = true;
             let query = url_encode_query(&target.name);
             
             let (os_cmd, os_args, os_tag) = if cfg!(target_os = "windows") {
@@ -283,6 +304,7 @@ impl App {
 
 
     pub fn kill_all_wasteful(&mut self) {
+        self.dirty = true;
         let mut killed_count = 0;
         let mut targets = Vec::new();
 
@@ -293,37 +315,45 @@ impl App {
             let mem_mb = process.memory() as f64 / 1024.0 / 1024.0;
             
             // ponytail: Parked is macOS halted-at-clean-point, treated as idle
-            let is_idle = cpu < 0.1 && matches!(status,
+            let is_idle = cpu < IDLE_CPU_THRESHOLD && matches!(status,
                 ProcessStatus::Sleep | ProcessStatus::Idle | ProcessStatus::Parked
             );
-            if is_idle && mem_mb > 50.0 {
+            if is_idle && mem_mb > WASTEFUL_MEM_MB {
                 targets.push((*pid, process.name().to_string_lossy().to_string()));
             }
         }
 
+        let found_count = targets.len();
         for (pid, _name) in targets {
             if let Some(process) = self.sys.process(pid) && process.kill() {
                 killed_count += 1;
             }
         }
 
-        if killed_count > 0 {
-            self.refresh();
-            self.message = Some(format!("Cleaned up {} wasteful processes", killed_count));
+        self.refresh();
+        self.message = Some(if killed_count > 0 {
+            if killed_count == found_count {
+                format!("Cleaned up {} wasteful processes", killed_count)
+            } else {
+                format!("Killed {}/{} wasteful processes ({} disappeared)", killed_count, found_count, found_count - killed_count)
+            }
+        } else if found_count > 0 {
+            format!("Could not kill any of {} wasteful processes (check permissions)", found_count)
         } else {
-            self.message = Some("No wasteful processes found to clean up".to_string());
-        }
+            "No wasteful processes found to clean up".to_string()
+        });
     }
 }
 
 /// ponytail: minimal URL query encoding for search terms, no external crate
 fn url_encode_query(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    // ponytail: len*3 to avoid reallocation when non-ASCII bytes expand to %XX
+    let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
             b' ' => out.push('+'),
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
+                out.push(char::from(b))
             }
             _ => out.push_str(&format!("%{:02X}", b)),
         }

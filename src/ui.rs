@@ -4,7 +4,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Row, Table, Paragraph, Gauge},
     Frame,
 };
-use crate::app::App;
+use crate::app::{App, SortColumn, SortDirection};
  
 pub const HEADER_AREA_HEIGHT: u16 = 2;
 pub const STATS_AREA_HEIGHT: u16 = 3;
@@ -102,18 +102,18 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
     let header_cells = vec![
-        ("PID", crate::app::SortColumn::Pid),
-        ("Name", crate::app::SortColumn::Name),
-        ("Status", crate::app::SortColumn::Status),
-        ("CPU (%)", crate::app::SortColumn::Cpu),
-        ("Memory (MB)", crate::app::SortColumn::Memory),
+        ("PID", SortColumn::Pid),
+        ("Name", SortColumn::Name),
+        ("Status", SortColumn::Status),
+        ("CPU (%)", SortColumn::Cpu),
+        ("Memory (MB)", SortColumn::Memory),
     ]
     .into_iter()
     .map(|(name, col)| {
         let text = if app.sort_column == col {
             let indicator = match app.sort_direction {
-                crate::app::SortDirection::Asc => "▲",
-                crate::app::SortDirection::Desc => "▼",
+                SortDirection::Asc => "▲",
+                SortDirection::Desc => "▼",
             };
             format!("{} {}", name, indicator)
         } else {
@@ -130,9 +130,9 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Here we'll show it in the footer area instead for a cleaner terminal look
 
     let rows: Vec<Row> = app.processes.iter().map(|p| {
-        let is_idle = p.cpu < 0.1 && (p.status == "Sleeping" || p.status == "Idle");
+        let is_idle = p.cpu < crate::app::IDLE_CPU_THRESHOLD && (p.status == "Sleeping" || p.status == "Idle");
         
-        let style = if is_idle && p.mem_mb > 50.0 {
+        let style = if is_idle && p.mem_mb > crate::app::WASTEFUL_MEM_MB {
             // Idle + High Memory: Warning state (Yellow)
             Style::default().fg(Color::Yellow)
         } else if is_idle {
