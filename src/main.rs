@@ -10,6 +10,14 @@ use idlekiller::app::App;
 use idlekiller::ui;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // ponytail: named constant for tick rate
+    const TICK_RATE_MS: u64 = 1000;
+
+    // Create app before terminal setup so the 100ms CPU-delta sleep
+    // doesn't block the terminal (avoids unresponsive startup).
+    let mut app = App::new();
+    let tick_rate = Duration::from_millis(TICK_RATE_MS);
+
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -17,9 +25,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // create app and run it
-    let tick_rate = Duration::from_millis(1000);
-    let mut app = App::new();
+    // run app
     let res = run_app(&mut terminal, &mut app, tick_rate);
 
     // restore terminal
@@ -50,7 +56,10 @@ where
     app.refresh();
 
     loop {
-        terminal.draw(|f| ui::draw(f, app))?;
+        if app.dirty && terminal.draw(|f| ui::draw(f, app)).is_ok() {
+            app.dirty = false;
+        }
+        // on draw failure, keep dirty=true so next iteration retries
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
@@ -63,6 +72,7 @@ where
                         match key.code {
                             KeyCode::Enter => {
                                 app.is_searching = false;
+                                app.dirty = true;
                             }
                             KeyCode::Esc => {
                                 app.is_searching = false;
@@ -88,6 +98,7 @@ where
                             KeyCode::Char('s') => app.open_search(),
                             KeyCode::Char('f') | KeyCode::Char('/') => {
                                 app.is_searching = true;
+                                app.dirty = true;
                             }
                             KeyCode::Char('K') => {
                                 app.kill_all_wasteful();
