@@ -121,6 +121,8 @@ impl App {
                     ProcessStatus::Stop => "Stopped",
                     ProcessStatus::Zombie => "Zombie",
                     ProcessStatus::Idle => "Idle",
+                    // ponytail: Parked (macOS halted-at-clean-point) mapped as Idle
+                    ProcessStatus::Parked => "Idle",
                     _ => "Other",
                 }.to_string(),
             }
@@ -169,6 +171,7 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
+        self.message = None;
         self.refresh_data();
         self.apply_filter();
     }
@@ -234,21 +237,26 @@ impl App {
             && let Some(process) = self.sys.process(target.pid)
         {
             let killed = process.kill();
+            let name = target.name.clone();
+            let pid = target.pid;
             if killed {
-                self.message = Some(format!("Killed process {} ({})", target.name, target.pid));
-                std::thread::sleep(std::time::Duration::from_millis(100));
                 self.refresh();
+                self.message = Some(format!("Killed process {} ({})", name, pid));
             } else {
-                // On macOS, kill status is a bool. If false, it's likely a permission issue
-                // or the process ended just before.
-                self.message = Some(format!("Failed to kill process {} ({}). Try running with sudo?", target.name, target.pid));
+                self.refresh();
+                let gone = self.sys.process(pid).is_none();
+                self.message = Some(if gone {
+                    format!("Process {} ({}) already ended", name, pid)
+                } else {
+                    format!("Failed to kill process {} ({}). Try running with sudo?", name, pid)
+                });
             }
         }
     }
 
     pub fn open_search(&mut self) {
         if let Some(target) = self.table_state.selected().and_then(|i| self.processes.get(i)) {
-            let query = target.name.replace(' ', "+");
+            let query = url_encode_query(&target.name);
             
             let (os_cmd, os_args, os_tag) = if cfg!(target_os = "windows") {
                 ("cmd", vec!["/C", "start"], "windows")
@@ -284,7 +292,10 @@ impl App {
             let status = process.status();
             let mem_mb = process.memory() as f64 / 1024.0 / 1024.0;
             
-            let is_idle = cpu < 0.1 && (status == ProcessStatus::Sleep || status == ProcessStatus::Idle);
+            // ponytail: Parked is macOS halted-at-clean-point, treated as idle
+            let is_idle = cpu < 0.1 && matches!(status,
+                ProcessStatus::Sleep | ProcessStatus::Idle | ProcessStatus::Parked
+            );
             if is_idle && mem_mb > 50.0 {
                 targets.push((*pid, process.name().to_string_lossy().to_string()));
             }
@@ -297,11 +308,25 @@ impl App {
         }
 
         if killed_count > 0 {
-            self.message = Some(format!("Cleaned up {} wasteful processes", killed_count));
-            std::thread::sleep(std::time::Duration::from_millis(100));
             self.refresh();
+            self.message = Some(format!("Cleaned up {} wasteful processes", killed_count));
         } else {
             self.message = Some("No wasteful processes found to clean up".to_string());
         }
     }
+}
+
+/// ponytail: minimal URL query encoding for search terms, no external crate
+fn url_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b' ' => out.push('+'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
