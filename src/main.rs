@@ -107,11 +107,7 @@ where
                         app.previous();
                         app.previous();
                     },
-                    event::MouseEventKind::Down(event::MouseButton::Left) => {
-                        if let Ok(size) = crossterm::terminal::size() {
-                            app.handle_click(mouse.column, mouse.row, size.0);
-                        }
-                    },
+                    event::MouseEventKind::Down(_) => {},
                     _ => {}
                 },
                 _ => {}
