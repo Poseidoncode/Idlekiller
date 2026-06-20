@@ -5,6 +5,19 @@ use ratatui::{
     Frame,
 };
 use crate::app::{App, SortColumn, SortDirection};
+
+/// Strip control characters and truncate process names for safe display.
+fn clean_name(name: &str) -> String {
+    // ponytail: strip control chars to prevent terminal escape injection
+    let clean: String = name.chars().filter(|c| !c.is_control()).collect();
+    // Truncate to 80 chars (by char count, not bytes) to prevent column overflow
+    // ponytail: char count avoids panic on multi-byte boundary
+    if clean.chars().count() > 80 {
+        format!("{}…", clean.chars().take(79).collect::<String>())
+    } else {
+        clean
+    }
+}
  
 pub const HEADER_AREA_HEIGHT: u16 = 2;
 pub const STATS_AREA_HEIGHT: u16 = 3;
@@ -17,6 +30,39 @@ pub const COL_NAME_MIN_WIDTH: u16 = 20;
 pub const COL_STATUS_WIDTH: u16 = 12;
 pub const COL_CPU_WIDTH: u16 = 10;
 pub const COL_MEM_WIDTH: u16 = 15;
+
+/// Must be kept in sync with draw_process_table column constraints + column_spacing.
+pub fn handle_header_click(app: &mut App, col_x: u16, row_y: u16, term_width: u16) {
+    // Table area starts after header + stats, header row is inside top border
+    let table_top = HEADER_AREA_HEIGHT + STATS_AREA_HEIGHT; // = 5
+    let header_y = table_top + 1; // inside border
+    if row_y != header_y || col_x == 0 {
+        return;
+    }
+
+    // Reconstruct column boundaries matching draw_process_table
+    let spacing: u16 = 2;
+    // Fixed total excludes Name which gets the remainder
+    let fixed: u16 = COL_PID_WIDTH + COL_STATUS_WIDTH + COL_CPU_WIDTH + COL_MEM_WIDTH + spacing * 4;
+    let name_w = (term_width.saturating_sub(2)).saturating_sub(fixed).max(COL_NAME_MIN_WIDTH);
+
+    let cols: [(u16, SortColumn); 5] = [
+        (COL_PID_WIDTH, SortColumn::Pid),
+        (name_w, SortColumn::Name),
+        (COL_STATUS_WIDTH, SortColumn::Status),
+        (COL_CPU_WIDTH, SortColumn::Cpu),
+        (COL_MEM_WIDTH, SortColumn::Memory),
+    ];
+
+    let mut x = 1u16; // after left border
+    for (w, col) in &cols {
+        if col_x >= x && col_x < x + w {
+            app.toggle_sort(*col);
+            return;
+        }
+        x += w + spacing;
+    }
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -145,7 +191,7 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
 
         Row::new(vec![
             Cell::from(p.pid.to_string()),
-            Cell::from(p.name.clone()),
+            Cell::from(clean_name(&p.name)),
             Cell::from(p.status.clone()),
             Cell::from(format!("{:.1}%", p.cpu)),
             Cell::from(format!("{:.1} MB", p.mem_mb)),
@@ -160,7 +206,7 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(COL_MEM_WIDTH),
     ])
     .header(header)
-    .block(Block::default().borders(Borders::ALL).title(" Processes (v/j=down, ^/k=up, s=search) "))
+    .block(Block::default().borders(Borders::ALL).title(" Processes (sort: click header, Tab=cycle, r=reverse; ↑/k↓/j; s=browser search, f=filter) "))
     .row_highlight_style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
     .column_spacing(2);
 
@@ -171,13 +217,14 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
     let message = if app.is_searching {
         format!(" SEARCH: [{}_] | [Esc] Cancel, [Enter] Finish ", app.search_query)
     } else if let Some(ref msg) = app.message {
-        format!(" {} | [f] Search, [K] Kill Wasteful, [q] Quit, [Enter/x] Kill ", msg)
+        format!(" {} | [Tab/r] Sort, [s] Browser search, [f] Filter, [K] Kill Wasteful, [q] Quit ", msg)
     } else {
-        " [f] Search, [K] Kill Wasteful, [q] Quit, [up/down] Nav, [Enter/x] Kill ".to_string()
+        " [Tab/r] Sort, [s] Browser search, [f] Search, [K] Kill Wasteful, [q] Quit, [↑/↓/k/j] Nav, [Enter/x] Kill ".to_string()
     };
 
     let p = Paragraph::new(message)
         .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(if app.is_searching { Color::Yellow } else { Color::White }));
+        .style(Style::default().fg(if app.is_searching { Color::Yellow } else { Color::White }))
+        .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(p, area);
 }
