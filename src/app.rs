@@ -1,10 +1,10 @@
 use std::cmp::Ordering;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use sysinfo::{Pid, ProcessStatus};
 
 // ponytail: named thresholds instead of raw magic numbers
 pub(crate) const IDLE_CPU_THRESHOLD: f32 = 0.1;
-pub(crate) const WASTEFUL_MEM_MB: f64 = 50.0;
+pub(crate) const WASTEFUL_MEM_MB: f64 = 500.0;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum SortColumn {
@@ -25,6 +25,7 @@ pub enum SortDirection {
 pub struct ProcessInfo {
     pub pid: Pid,
     pub name: String,
+    pub name_lower: String,
     pub cpu: f32,
     pub mem_mb: f64,
     pub status: String,
@@ -54,6 +55,9 @@ pub struct App {
     pub is_searching: bool,
     pub search_query: String,
     pub dirty: bool,
+    pub message_instant: Option<Instant>,
+    pub confirming_kill_all: bool,
+    last_kill_instant: Option<Instant>,
 }
 
 impl Default for App {
@@ -95,17 +99,15 @@ impl App {
             },
             boot_time,
             dirty: true,
+            message_instant: None,
+            confirming_kill_all: false,
+            last_kill_instant: None,
             is_searching: false,
             search_query: String::new(),
         };
         
         // populate initial data immediately
-        app.refresh();
-        // second refresh to get CPU usage (sysinfo needs time delta between refreshes)
-        // give it a tiny sleep to allow sysinfo to record a delta
-        // ponytail: named constant for CPU delta sleep
-        const CPU_DELTA_SLEEP_MS: u64 = 100;
-        std::thread::sleep(Duration::from_millis(CPU_DELTA_SLEEP_MS));
+        // ponytail: skip the CPU-delta sleep — first tick will compute real values
         app.refresh();
         app
     }
@@ -127,6 +129,7 @@ impl App {
             ProcessInfo {
                 pid: *pid,
                 name: process.name().to_string_lossy().to_string(),
+                name_lower: process.name().to_string_lossy().to_lowercase(),
                 cpu: process.cpu_usage(),
                 mem_mb: process.memory() as f64 / 1024.0 / 1024.0,
                 status: match process.status() {
@@ -146,17 +149,21 @@ impl App {
     /// Filter + sort from all_processes (in-memory, no I/O)
     pub fn apply_filter(&mut self) {
         self.dirty = true;
-        // ponytail: process names are always ASCII on all major OS kernels
-        let search_pattern = self.search_query.to_ascii_lowercase();
+        let search_pattern = self.search_query.to_lowercase();
+
+        // Save selected PID before filtering/sorting so selection follows the process
+        let selected_pid = self.table_state.selected()
+            .and_then(|i| self.processes.get(i))
+            .map(|p| p.pid);
 
         self.processes = self.all_processes.iter().filter(|p| {
-            search_pattern.is_empty() || p.name.to_ascii_lowercase().contains(&search_pattern)
+            search_pattern.is_empty() || p.name_lower.contains(&search_pattern)
         }).cloned().collect();
 
         self.processes.sort_by(|a, b| {
             let ordering = match self.sort_column {
                 SortColumn::Pid => a.pid.as_u32().cmp(&b.pid.as_u32()),
-                SortColumn::Name => a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()),
+                SortColumn::Name => a.name_lower.cmp(&b.name_lower),
                 SortColumn::Status => a.status.cmp(&b.status),
                 SortColumn::Cpu => a.cpu.partial_cmp(&b.cpu).unwrap_or(Ordering::Equal),
                 SortColumn::Memory => a.mem_mb.partial_cmp(&b.mem_mb).unwrap_or(Ordering::Equal),
@@ -172,23 +179,22 @@ impl App {
             }
         });
 
-        let len = self.processes.len();
-        if len > 0 {
-            if let Some(selected) = self.table_state.selected() {
-                if selected >= len {
-                    self.table_state.select(Some(len - 1));
-                }
-            } else {
-                self.table_state.select(Some(0));
-            }
-        } else {
-            self.table_state.select(None);
-        }
+        // Restore selection by PID so the same process stays highlighted after sort
+        let new_selected = selected_pid
+            .and_then(|pid| self.processes.iter().position(|p| p.pid == pid))
+            .or(if self.processes.is_empty() { None } else { Some(0) });
+        self.table_state.select(new_selected);
     }
 
     pub fn refresh(&mut self) {
-        self.dirty = true;
-        self.message = None;
+        // Keep messages visible for at least 4 seconds
+        let expired = self.message_instant
+            .map(|t| t.elapsed() >= Duration::from_secs(4))
+            .unwrap_or(true);
+        if expired {
+            self.message = None;
+            self.message_instant = None;
+        }
         self.refresh_data();
         self.apply_filter();
     }
@@ -252,16 +258,53 @@ impl App {
     }
 
     pub fn kill_selected(&mut self) {
-        self.dirty = true;
-        if let Some(target) = self.table_state.selected().and_then(|i| self.processes.get(i))
-            && let Some(process) = self.sys.process(target.pid)
-        {
+        // Debounce: prevent rapid-fire kills
+        const KILL_DEBOUNCE_MS: u64 = 200;
+        if let Some(last) = self.last_kill_instant {
+            if last.elapsed() < Duration::from_millis(KILL_DEBOUNCE_MS) {
+                return;
+            }
+        }
+        self.last_kill_instant = Some(Instant::now());
+
+        if self.processes.is_empty() {
+            self.message = Some("No process selected — list is empty".to_string());
+            self.message_instant = Some(Instant::now());
+            return;
+        }
+
+        let selected_info = self.table_state.selected()
+            .and_then(|i| self.processes.get(i))
+            .map(|p| (p.name.clone(), p.pid));
+
+        let Some((ref name, pid)) = selected_info else {
+            self.refresh();
+            self.message = Some("No process selected".to_string());
+            self.message_instant = Some(Instant::now());
+            return;
+        };
+
+        // Clone what we need before any mutable borrow
+        let name = name.clone();
+
+        // Protect critical system PIDs and self
+        if is_protected_pid(pid) {
+            self.message = Some(format!("Refusing to kill protected PID {}", pid.as_u32()));
+            self.message_instant = Some(Instant::now());
+            return;
+        }
+        if Some(pid) == sysinfo::get_current_pid().ok() {
+            self.message = Some("Refusing to kill self".to_string());
+            self.message_instant = Some(Instant::now());
+            return;
+        }
+
+        if let Some(process) = self.sys.process(pid) {
             let killed = process.kill();
-            let name = target.name.clone();
-            let pid = target.pid;
             if killed {
                 self.refresh();
                 self.message = Some(format!("Killed process {} ({})", name, pid));
+                self.message_instant = Some(Instant::now());
             } else {
                 self.refresh();
                 let gone = self.sys.process(pid).is_none();
@@ -270,46 +313,119 @@ impl App {
                 } else {
                     format!("Failed to kill process {} ({}). Try running with sudo?", name, pid)
                 });
+                self.message_instant = Some(Instant::now());
             }
+        } else {
+            self.refresh();
+            self.message = Some(format!("Process {} ({}) no longer exists", name, pid.as_u32()));
+            self.message_instant = Some(Instant::now());
         }
     }
 
-    pub fn open_search(&mut self) {
-        if let Some(target) = self.table_state.selected().and_then(|i| self.processes.get(i)) {
-            self.dirty = true;
-            let query = url_encode_query(&target.name);
-            
-            let (os_cmd, os_args, os_tag) = if cfg!(target_os = "windows") {
-                ("cmd", vec!["/C", "start"], "windows")
-            } else if cfg!(target_os = "macos") {
-                ("open", vec![], "mac")
-            } else {
-                ("xdg-open", vec![], "linux")
-            };
+    fn cycle_to(&mut self, next: SortColumn) {
+        // Reset confirmation state on any sort action
+        self.confirming_kill_all = false;
+        self.toggle_sort(next);
+    }
 
-            let url = format!("https://www.google.com/search?q={}+process+{}", query, os_tag);
-            
-            let mut cmd = std::process::Command::new(os_cmd);
-            for arg in os_args {
-                cmd.arg(arg);
-            }
-            
-            if let Err(e) = cmd.arg(&url).spawn() {
-                self.message = Some(format!("Failed to open browser: {}", e));
-            } else {
-                self.message = Some(format!("Searching for process: {}", target.name));
-            }
+    /// Cycle to next sort column (Tab).
+    pub fn cycle_sort_column(&mut self) {
+        let next = match self.sort_column {
+            SortColumn::Pid => SortColumn::Name,
+            SortColumn::Name => SortColumn::Status,
+            SortColumn::Status => SortColumn::Cpu,
+            SortColumn::Cpu => SortColumn::Memory,
+            SortColumn::Memory => SortColumn::Pid,
+        };
+        self.cycle_to(next);
+    }
+
+    /// Cycle to previous sort column (Shift+Tab).
+    pub fn cycle_sort_column_reverse(&mut self) {
+        let prev = match self.sort_column {
+            SortColumn::Pid => SortColumn::Memory,
+            SortColumn::Name => SortColumn::Pid,
+            SortColumn::Status => SortColumn::Name,
+            SortColumn::Cpu => SortColumn::Status,
+            SortColumn::Memory => SortColumn::Cpu,
+        };
+        self.cycle_to(prev);
+    }
+
+    /// Reverse current sort direction.
+    pub fn toggle_sort_direction(&mut self) {
+        self.toggle_sort(self.sort_column);
+    }
+
+    pub fn toggle_sort(&mut self, column: SortColumn) {
+        if self.sort_column == column {
+            // Same column → toggle direction
+            self.sort_direction = match self.sort_direction {
+                SortDirection::Asc => SortDirection::Desc,
+                SortDirection::Desc => SortDirection::Asc,
+            };
+        } else {
+            // New column → start ascending
+            self.sort_column = column;
+            self.sort_direction = SortDirection::Asc;
+        }
+        self.apply_filter();
+    }
+
+    pub fn open_search(&mut self) {
+        let Some(target) = self.table_state.selected().and_then(|i| self.processes.get(i)) else {
+            self.message = Some("No process selected to search for".to_string());
+            self.message_instant = Some(Instant::now());
+            return;
+        };
+        self.dirty = true;
+        let query = url_encode_query(&target.name);
+        
+        let (os_cmd, os_args, os_tag) = if cfg!(target_os = "windows") {
+            ("cmd", vec!["/C", "start"], "windows")
+        } else if cfg!(target_os = "macos") {
+            ("open", vec![], "mac")
+        } else {
+            ("xdg-open", vec![], "linux")
+        };
+
+        let url = format!("https://www.google.com/search?q={}+process+{}", query, os_tag);
+        
+        let mut cmd = std::process::Command::new(os_cmd);
+        for arg in os_args {
+            cmd.arg(arg);
+        }
+        
+        if let Err(e) = cmd.arg(&url).spawn() {
+            self.message = Some(format!("Failed to open browser: {}", e));
+            self.message_instant = Some(Instant::now());
+        } else {
+            self.message = Some(format!("Searching for process: {}", target.name));
+            self.message_instant = Some(Instant::now());
         }
     }
 
 
     pub fn kill_all_wasteful(&mut self) {
-        self.dirty = true;
+        // Confirmation: first press sets flag, second press executes
+        if !self.confirming_kill_all {
+            self.confirming_kill_all = true;
+            self.message = Some("Press K again to confirm killing all wasteful processes".to_string());
+            self.message_instant = Some(Instant::now());
+            return;
+        }
+        self.confirming_kill_all = false;
+
+        let own_pid = sysinfo::get_current_pid().ok();
         let mut killed_count = 0;
-        let mut targets = Vec::new();
+        let mut targets: Vec<Pid> = Vec::new();
 
         // Identify wasteful processes first to avoid borrow checker issues with sys.processes()
         for (pid, process) in self.sys.processes() {
+            // Never target self or protected PIDs
+            if Some(*pid) == own_pid || is_protected_pid(*pid) {
+                continue;
+            }
             let cpu = process.cpu_usage();
             let status = process.status();
             let mem_mb = process.memory() as f64 / 1024.0 / 1024.0;
@@ -319,12 +435,12 @@ impl App {
                 ProcessStatus::Sleep | ProcessStatus::Idle | ProcessStatus::Parked
             );
             if is_idle && mem_mb > WASTEFUL_MEM_MB {
-                targets.push((*pid, process.name().to_string_lossy().to_string()));
+                targets.push(*pid);
             }
         }
 
         let found_count = targets.len();
-        for (pid, _name) in targets {
+        for pid in targets {
             if let Some(process) = self.sys.process(pid) && process.kill() {
                 killed_count += 1;
             }
@@ -335,14 +451,21 @@ impl App {
             if killed_count == found_count {
                 format!("Cleaned up {} wasteful processes", killed_count)
             } else {
-                format!("Killed {}/{} wasteful processes ({} disappeared)", killed_count, found_count, found_count - killed_count)
+                format!("Killed {}/{} wasteful processes ({} already exited)", killed_count, found_count, found_count - killed_count)
             }
         } else if found_count > 0 {
             format!("Could not kill any of {} wasteful processes (check permissions)", found_count)
         } else {
             "No wasteful processes found to clean up".to_string()
         });
+        self.message_instant = Some(Instant::now());
     }
+}
+
+/// Skip PID 0, 1 (kernel/init/system-critical) and let caller handle self-pid.
+fn is_protected_pid(pid: Pid) -> bool {
+    let raw = pid.as_u32();
+    raw == 0 || raw == 1
 }
 
 /// ponytail: minimal URL query encoding for search terms, no external crate
