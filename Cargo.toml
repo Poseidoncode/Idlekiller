@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.86"
 authors = ["Poseidoncode"]
 description = "A Rust-based TUI process manager for identifying and cleaning up resource-heavy processes"
+license = "BSD-3-Clause"
 repository = "https://github.com/Poseidoncode/Idlekiller"
 readme = "README.md"
 
