@@ -35,7 +35,7 @@ const C_SLATE_MID:Color = Color::Rgb( 30,  58, 100);
 /// Abyss-bg: near-black with blue undertone (even rows)
 const C_ABYSS:    Color = Color::Rgb(  4,   9,  20);
 /// Surface-bg: slightly lighter panel (odd rows / header chrome)
-const C_SURFACE:  Color = Color::Rgb(  9,  18,  40);
+const _C_SURFACE: Color = Color::Rgb(  9,  18,  40);
 /// Elevated-bg: header row background
 const C_ELEVATED: Color = Color::Rgb( 14,  28,  58);
 /// Selected highlight: deep blue glow without washing out text
@@ -342,7 +342,7 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         .processes
         .iter()
         .enumerate()
-        .map(|(i, p)| {
+        .map(|(_i, p)| {
             let is_idle = p.cpu < crate::app::IDLE_CPU_THRESHOLD
                 && (p.status == "Sleeping" || p.status == "Idle");
             let is_wasteful = is_idle && p.mem_mb > crate::app::WASTEFUL_MEM_MB;
