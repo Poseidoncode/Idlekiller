@@ -3,7 +3,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table},
 };
 
 /// Strip control characters and truncate process names for safe display.
@@ -22,7 +22,7 @@ fn clean_name(name: &str) -> String {
 pub const HEADER_AREA_HEIGHT: u16 = 3;
 pub const STATS_AREA_HEIGHT: u16 = 5;
 pub const TABLE_HEADER_HEIGHT: u16 = 1;
-pub const TABLE_MARGIN_BOTTOM: u16 = 1;
+pub const TABLE_MARGIN_BOTTOM: u16 = 0;
 
 // Column constraints
 pub const COL_PID_WIDTH: u16 = 8;
@@ -33,9 +33,9 @@ pub const COL_MEM_WIDTH: u16 = 15;
 
 /// Must be kept in sync with draw_process_table column constraints + column_spacing.
 pub fn handle_header_click(app: &mut App, col_x: u16, row_y: u16, term_width: u16) {
-    // Table area starts after header (3) + stats (5); the header row is just inside the top border.
+    // Table area starts after header (3) + stats (5); the header row is inside the top border.
     let table_top = HEADER_AREA_HEIGHT + STATS_AREA_HEIGHT; // = 8
-    let header_y = table_top + 1; // inside border
+    let header_y = table_top + 1; // inside top border of the main panel
     if row_y != header_y || col_x == 0 {
         return;
     }
@@ -56,7 +56,7 @@ pub fn handle_header_click(app: &mut App, col_x: u16, row_y: u16, term_width: u1
         (COL_MEM_WIDTH, SortColumn::Memory),
     ];
 
-    let mut x = 1u16; // after left border
+    let mut x = 1u16; // after left border of the main panel
     for (w, col) in &cols {
         if col_x >= x && col_x < x + w {
             app.toggle_sort(*col);
@@ -67,6 +67,13 @@ pub fn handle_header_click(app: &mut App, col_x: u16, row_y: u16, term_width: u1
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let main_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = main_block.inner(f.area());
+    f.render_widget(main_block, f.area());
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
@@ -78,7 +85,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             ]
             .as_ref(),
         )
-        .split(f.area());
+        .split(inner);
 
     draw_header(f, chunks[0]);
     draw_system_stats(f, app, chunks[1]);
@@ -89,10 +96,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn draw_header(f: &mut Frame, area: Rect) {
     let text = " IdleKiller - Find and Kill Inactive Processes ";
     let header = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL))
         .style(
             Style::default()
-                .fg(Color::White)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
         .centered();
@@ -116,7 +122,6 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
     // CPU Usage Gauge
     let cpu_display = stats.cpu_usage;
     let cpu_gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(" CPU USAGE "))
         .gauge_style(Style::default().fg(if cpu_display > 80.0 {
             Color::Red
         } else if cpu_display > 50.0 {
@@ -125,7 +130,7 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
             Color::Cyan
         }))
         .percent(cpu_display.clamp(0.0, 100.0) as u16)
-        .label(format!("{:.1}%", cpu_display.max(0.0)));
+        .label(format!("CPU: {:.1}%", cpu_display.max(0.0)));
 
     // RAM Usage Gauge
     let ram_display_used = stats.ram_used_mb;
@@ -136,26 +141,25 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
         0
     };
     let ram_gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(" RAM USAGE "))
         .gauge_style(Style::default().fg(if ram_percent > 80 {
             Color::Red
         } else if ram_percent > 50 {
             Color::Yellow
         } else {
-            Color::Green
+            Color::Cyan
         }))
         .percent(ram_percent)
         .label(format!(
-            "{:.1}GB / {:.1}GB",
+            "RAM: {:.1}/{:.1}GB",
             ram_display_used / 1024.0,
             ram_display_total / 1024.0
         ));
 
     // Uptime Text
-    let uptime_text = format!("UPTIME\n{}", uptime_str);
+    let uptime_text = format!("Uptime\n{}", uptime_str);
     let uptime_paragraph = Paragraph::new(uptime_text)
-        .block(Block::default().borders(Borders::ALL).title(" UPTIME "))
-        .style(Style::default().fg(Color::Blue));
+        .style(Style::default().fg(Color::Gray))
+        .centered();
 
     // Layout for the three stats
     let chunks = Layout::default()
@@ -216,8 +220,8 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
                 // Idle + High Memory: Warning state (Yellow)
                 Style::default().fg(Color::Yellow)
             } else if is_idle {
-                // Idle + Low Memory: Normal but inactive (White)
-                Style::default().fg(Color::White)
+                // Idle + Low Memory: Normal but inactive (Gray)
+                Style::default().fg(Color::Gray)
             } else {
                 // Active process (Cyan)
                 Style::default().fg(Color::Cyan)
@@ -245,10 +249,8 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         ],
     )
     .header(header)
-    .block(Block::default().borders(Borders::ALL).title(" Processes "))
     .row_highlight_style(
         Style::default()
-            .bg(Color::Blue)
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     )
@@ -274,11 +276,10 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let p = Paragraph::new(message)
-        .block(Block::default().borders(Borders::ALL))
         .style(Style::default().fg(if app.is_searching {
             Color::Yellow
         } else {
-            Color::White
+            Color::Gray
         }))
         .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(p, area);
