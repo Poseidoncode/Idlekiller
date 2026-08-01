@@ -27,18 +27,6 @@
 curl -sSL https://raw.githubusercontent.com/Poseidoncode/Idlekiller/main/install.sh | bash
 ```
 
-> 如果你不想直接 pipe 到 `bash`，可以先查看 [install.sh](./install.sh) 腳本內容。
-
-### 從原始碼編譯
-
-```bash
-git clone https://github.com/Poseidoncode/Idlekiller.git
-cd Idlekiller
-cargo build --release
-```
-
-編譯完成後，執行檔位於 `target/release/idlekiller`。
-
 ### Windows
 
 使用 PowerShell 一鍵安裝（需先安裝 Rust）：
@@ -47,36 +35,11 @@ cargo build --release
 irm https://raw.githubusercontent.com/Poseidoncode/Idlekiller/main/install.ps1 | iex
 ```
 
-> 如果你不想直接 pipe 到 `iex`，可以先查看 [install.ps1](./install.ps1)  腳本內容。
-
-### macOS
-
-安裝到系統路徑：
-
-```bash
-sudo cp target/release/idlekiller /usr/local/bin/
-```
-
-或打包成可雙擊開啟的 `.app`：
-
-```bash
-make app
-# 然後將 Idlekiller.app 拖入 /Applications
-```
-
-### Linux
-
-```bash
-sudo cp target/release/idlekiller /usr/local/bin/
-```
-
 ## 使用方式
 
 ```bash
 idlekiller
 ```
-
-在 macOS 上也可以從 Launchpad 或 Finder 開啟 `Idlekiller.app`。
 
 ## 操作說明
 
@@ -106,11 +69,3 @@ idlekiller
 
 按兩次 `Shift + K` 即可終止所有符合條件的進程。`0`、`1` 號 PID 與 Idlekiller 自身會受到保護，不會被終止。
 
-## 開發
-
-```bash
-cargo run           # 開發模式執行
-cargo test          # 執行邏輯與效能測試
-cargo build --release
-make app            # 打包 macOS .app
-```
