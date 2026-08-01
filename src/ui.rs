@@ -1,10 +1,10 @@
+use crate::app::{App, SortColumn, SortDirection};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Cell, Row, Table, Paragraph, Gauge},
-    Frame,
+    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
 };
-use crate::app::{App, SortColumn, SortDirection};
 
 /// Strip control characters and truncate process names for safe display.
 fn clean_name(name: &str) -> String {
@@ -18,9 +18,9 @@ fn clean_name(name: &str) -> String {
         clean
     }
 }
- 
-pub const HEADER_AREA_HEIGHT: u16 = 2;
-pub const STATS_AREA_HEIGHT: u16 = 3;
+
+pub const HEADER_AREA_HEIGHT: u16 = 3;
+pub const STATS_AREA_HEIGHT: u16 = 5;
 pub const TABLE_HEADER_HEIGHT: u16 = 1;
 pub const TABLE_MARGIN_BOTTOM: u16 = 1;
 
@@ -33,8 +33,8 @@ pub const COL_MEM_WIDTH: u16 = 15;
 
 /// Must be kept in sync with draw_process_table column constraints + column_spacing.
 pub fn handle_header_click(app: &mut App, col_x: u16, row_y: u16, term_width: u16) {
-    // Table area starts after header + stats, header row is inside top border
-    let table_top = HEADER_AREA_HEIGHT + STATS_AREA_HEIGHT; // = 5
+    // Table area starts after header (3) + stats (5); the header row is just inside the top border.
+    let table_top = HEADER_AREA_HEIGHT + STATS_AREA_HEIGHT; // = 8
     let header_y = table_top + 1; // inside border
     if row_y != header_y || col_x == 0 {
         return;
@@ -44,7 +44,9 @@ pub fn handle_header_click(app: &mut App, col_x: u16, row_y: u16, term_width: u1
     let spacing: u16 = 2;
     // Fixed total excludes Name which gets the remainder
     let fixed: u16 = COL_PID_WIDTH + COL_STATUS_WIDTH + COL_CPU_WIDTH + COL_MEM_WIDTH + spacing * 4;
-    let name_w = (term_width.saturating_sub(2)).saturating_sub(fixed).max(COL_NAME_MIN_WIDTH);
+    let name_w = (term_width.saturating_sub(2))
+        .saturating_sub(fixed)
+        .max(COL_NAME_MIN_WIDTH);
 
     let cols: [(u16, SortColumn); 5] = [
         (COL_PID_WIDTH, SortColumn::Pid),
@@ -88,14 +90,18 @@ fn draw_header(f: &mut Frame, area: Rect) {
     let text = " IdleKiller - Find and Kill Inactive Processes ";
     let header = Paragraph::new(text)
         .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
         .centered();
     f.render_widget(header, area);
 }
 
 fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
     let stats = &app.system_stats;
-    
+
     // Calculate uptime components
     let days = stats.uptime_seconds / 86400;
     let hours = (stats.uptime_seconds % 86400) / 3600;
@@ -111,9 +117,15 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
     let cpu_display = stats.cpu_usage;
     let cpu_gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(" CPU USAGE "))
-        .gauge_style(Style::default().fg(if cpu_display > 80.0 { Color::Red } else if cpu_display > 50.0 { Color::Yellow } else { Color::Cyan }))
-        .percent((cpu_display as u16).min(100))
-        .label(format!("{}%", cpu_display));
+        .gauge_style(Style::default().fg(if cpu_display > 80.0 {
+            Color::Red
+        } else if cpu_display > 50.0 {
+            Color::Yellow
+        } else {
+            Color::Cyan
+        }))
+        .percent(cpu_display.clamp(0.0, 100.0) as u16)
+        .label(format!("{:.1}%", cpu_display.max(0.0)));
 
     // RAM Usage Gauge
     let ram_display_used = stats.ram_used_mb;
@@ -125,12 +137,22 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let ram_gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(" RAM USAGE "))
-        .gauge_style(Style::default().fg(if ram_percent > 80 { Color::Red } else if ram_percent > 50 { Color::Yellow } else { Color::Green }))
+        .gauge_style(Style::default().fg(if ram_percent > 80 {
+            Color::Red
+        } else if ram_percent > 50 {
+            Color::Yellow
+        } else {
+            Color::Green
+        }))
         .percent(ram_percent)
-        .label(format!("{:.1}GB / {:.1}GB", ram_display_used / 1024.0, ram_display_total / 1024.0));
+        .label(format!(
+            "{:.1}GB / {:.1}GB",
+            ram_display_used / 1024.0,
+            ram_display_total / 1024.0
+        ));
 
     // Uptime Text
-    let uptime_text = format!("UPTIME\n{}\n[||||||||||||||||||..]", uptime_str);
+    let uptime_text = format!("UPTIME\n{}", uptime_str);
     let uptime_paragraph = Paragraph::new(uptime_text)
         .block(Block::default().borders(Borders::ALL).title(" UPTIME "))
         .style(Style::default().fg(Color::Blue));
@@ -138,7 +160,11 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
     // Layout for the three stats
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)])
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+        ])
         .split(area);
 
     f.render_widget(cpu_gauge, chunks[0]);
@@ -165,7 +191,11 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             name.to_string()
         };
-        Cell::from(text).style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+        Cell::from(text).style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
     });
     let header = Row::new(header_cells)
         .style(Style::default().add_modifier(Modifier::BOLD))
@@ -175,39 +205,53 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
     // If searching, show the search query in the header area or a special row
     // Here we'll show it in the footer area instead for a cleaner terminal look
 
-    let rows: Vec<Row> = app.processes.iter().map(|p| {
-        let is_idle = p.cpu < crate::app::IDLE_CPU_THRESHOLD && (p.status == "Sleeping" || p.status == "Idle");
-        
-        let style = if is_idle && p.mem_mb > crate::app::WASTEFUL_MEM_MB {
-            // Idle + High Memory: Warning state (Yellow)
-            Style::default().fg(Color::Yellow)
-        } else if is_idle {
-            // Idle + Low Memory: Normal but inactive (White)
-            Style::default().fg(Color::White)
-        } else {
-            // Active process (Cyan)
-            Style::default().fg(Color::Cyan)
-        };
+    let rows: Vec<Row> = app
+        .processes
+        .iter()
+        .map(|p| {
+            let is_idle = p.cpu < crate::app::IDLE_CPU_THRESHOLD
+                && (p.status == "Sleeping" || p.status == "Idle");
 
-        Row::new(vec![
-            Cell::from(p.pid.to_string()),
-            Cell::from(clean_name(&p.name)),
-            Cell::from(p.status.clone()),
-            Cell::from(format!("{:.1}%", p.cpu)),
-            Cell::from(format!("{:.1} MB", p.mem_mb)),
-        ]).style(style)
-    }).collect();
+            let style = if is_idle && p.mem_mb > crate::app::WASTEFUL_MEM_MB {
+                // Idle + High Memory: Warning state (Yellow)
+                Style::default().fg(Color::Yellow)
+            } else if is_idle {
+                // Idle + Low Memory: Normal but inactive (White)
+                Style::default().fg(Color::White)
+            } else {
+                // Active process (Cyan)
+                Style::default().fg(Color::Cyan)
+            };
 
-    let table = Table::new(rows, [
-        Constraint::Length(COL_PID_WIDTH),
-        Constraint::Min(COL_NAME_MIN_WIDTH),
-        Constraint::Length(COL_STATUS_WIDTH),
-        Constraint::Length(COL_CPU_WIDTH),
-        Constraint::Length(COL_MEM_WIDTH),
-    ])
+            Row::new(vec![
+                Cell::from(p.pid.to_string()),
+                Cell::from(clean_name(&p.name)),
+                Cell::from(p.status.clone()),
+                Cell::from(format!("{:.1}%", p.cpu)),
+                Cell::from(format!("{:.1} MB", p.mem_mb)),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(COL_PID_WIDTH),
+            Constraint::Min(COL_NAME_MIN_WIDTH),
+            Constraint::Length(COL_STATUS_WIDTH),
+            Constraint::Length(COL_CPU_WIDTH),
+            Constraint::Length(COL_MEM_WIDTH),
+        ],
+    )
     .header(header)
-    .block(Block::default().borders(Borders::ALL).title(" Processes (sort: click header, Tab=cycle, r=reverse; ↑/k↓/j; s=browser search, f=filter) "))
-    .row_highlight_style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
+    .block(Block::default().borders(Borders::ALL).title(" Processes "))
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )
     .column_spacing(2);
 
     f.render_stateful_widget(table, area, &mut app.table_state);
@@ -215,16 +259,27 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
     let message = if app.is_searching {
-        format!(" SEARCH: [{}_] | [Esc] Cancel, [Enter] Finish ", app.search_query)
+        format!(
+            " SEARCH: [{}_] | [Esc] Cancel, [Enter] Finish ",
+            app.search_query
+        )
     } else if let Some(ref msg) = app.message {
-        format!(" {} | [Tab/r] Sort, [s] Browser search, [f] Filter, [K] Kill Wasteful, [q] Quit ", msg)
+        let safe_msg: String = msg.chars().filter(|c| !c.is_control()).collect();
+        format!(
+            " {} | [Tab/r] Sort, [s] Browser search, [f] Filter, [K] Kill Wasteful, [q] Quit ",
+            safe_msg
+        )
     } else {
         " [Tab/r] Sort, [s] Browser search, [f] Search, [K] Kill Wasteful, [q] Quit, [↑/↓/k/j] Nav, [Enter/x] Kill ".to_string()
     };
 
     let p = Paragraph::new(message)
         .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(if app.is_searching { Color::Yellow } else { Color::White }))
+        .style(Style::default().fg(if app.is_searching {
+            Color::Yellow
+        } else {
+            Color::White
+        }))
         .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(p, area);
 }

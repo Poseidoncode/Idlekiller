@@ -1,10 +1,17 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    cursor::Show,
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
-use std::{error::Error, io, time::{Duration, Instant}};
+use ratatui::{Terminal, backend::CrosstermBackend};
+use std::{
+    error::Error,
+    io,
+    time::{Duration, Instant},
+};
 
 use idlekiller::app::App;
 use idlekiller::ui;
@@ -14,7 +21,12 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            Show
+        );
     }
 }
 
@@ -38,52 +50,39 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Check minimum terminal size
     let size = terminal.size()?;
     if size.width < 80 || size.height < 24 {
-        disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-        return Err(format!("Terminal too small: {}x{} (need at least 80x24)", size.width, size.height).into());
+        return Err(format!(
+            "Terminal too small: {}x{} (need at least 80x24)",
+            size.width, size.height
+        )
+        .into());
     }
 
     // run app
     let res = run_app(&mut terminal, &mut app, tick_rate);
 
-    // restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    // Restore terminal on the normal exit path; the guard handles panics.
+    drop(_guard);
 
-    if let Err(err) = res {
-        println!("{:?}", err);
-    }
-
-    Ok(())
+    res
 }
 
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     tick_rate: Duration,
-) -> Result<(), Box<dyn Error>>
-where
-    <B as ratatui::backend::Backend>::Error: 'static,
-{
+) -> Result<(), Box<dyn Error>> {
     let mut last_tick = Instant::now();
     // ponytail: exponential backoff on draw failure to avoid busy-spin
     let mut draw_failures: u32 = 0;
 
     loop {
-        let draw_ok = terminal.draw(|f| ui::draw(f, app)).is_ok();
+        let draw_ok = if app.dirty {
+            terminal.draw(|f| ui::draw(f, app)).is_ok()
+        } else {
+            true
+        };
         if draw_ok {
-            if app.dirty {
-                app.dirty = false;
-            }
+            app.dirty = false;
             draw_failures = 0; // reset on any successful draw
         } else {
             draw_failures = draw_failures.saturating_add(1);
@@ -106,22 +105,31 @@ where
         if crossterm::event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    let plain = !key.modifiers.intersects(
+                        KeyModifiers::CONTROL
+                            | KeyModifiers::ALT
+                            | KeyModifiers::SUPER
+                            | KeyModifiers::HYPER,
+                    );
                     if app.is_searching {
                         match key.code {
-                            KeyCode::Enter => {
+                            KeyCode::Enter if plain => {
                                 app.is_searching = false;
                                 app.dirty = true;
                             }
-                            KeyCode::Esc => {
+                            KeyCode::Esc if plain => {
                                 app.is_searching = false;
                                 app.search_query.clear();
                                 app.apply_filter();
                             }
-                            KeyCode::Char(c) => {
+                            KeyCode::Char(c) if plain => {
                                 app.search_query.push(c);
                                 app.apply_filter();
                             }
-                            KeyCode::Backspace => {
+                            KeyCode::Backspace if plain => {
                                 app.search_query.pop();
                                 app.apply_filter();
                             }
@@ -129,56 +137,58 @@ where
                         }
                     } else {
                         match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-                            KeyCode::Down | KeyCode::Char('j') => app.next(),
-                            KeyCode::Up | KeyCode::Char('k') => app.previous(),
-                            KeyCode::Enter | KeyCode::Char('x') => app.kill_selected(),
-                            KeyCode::Char('s') => app.open_search(),
-                            KeyCode::Char('f') | KeyCode::Char('/') => {
+                            KeyCode::Char('q') | KeyCode::Esc if plain => app.should_quit = true,
+                            KeyCode::Down | KeyCode::Char('j') if plain => app.next(),
+                            KeyCode::Up | KeyCode::Char('k') if plain => app.previous(),
+                            KeyCode::Enter | KeyCode::Char('x') if plain => app.kill_selected(),
+                            KeyCode::Char('s') if plain => app.open_search(),
+                            KeyCode::Char('f') | KeyCode::Char('/') if plain => {
                                 app.is_searching = true;
                                 app.dirty = true;
                             }
-                            KeyCode::Char('K') => {
+                            KeyCode::Char('K') if plain => {
                                 app.kill_all_wasteful();
                             }
-                            KeyCode::Tab => {
+                            KeyCode::Tab if plain => {
                                 app.cycle_sort_column();
                             }
-                            KeyCode::BackTab => {
+                            KeyCode::BackTab if plain => {
                                 app.cycle_sort_column_reverse();
                             }
-                            KeyCode::Char('r') => {
+                            KeyCode::Char('r') if plain => {
                                 app.toggle_sort_direction();
                             }
                             _ => {
-                                app.confirming_kill_all = false; // any other key cancels confirmation
+                                // any other key cancels confirmation
+                                app.confirming_kill_all = false;
+                                app.wasteful_targets.clear();
                             }
                         }
                     }
-                },
+                }
                 Event::Resize(w, h) => {
                     app.dirty = true;
                     if w < 80 || h < 24 {
                         app.message = Some(format!("Terminal too small: {}x{} (need 80x24)", w, h));
                         app.message_instant = Some(Instant::now());
                     }
-                },
+                }
                 Event::Mouse(mouse) => match mouse.kind {
                     event::MouseEventKind::ScrollDown => {
                         app.next();
                         app.next();
                         app.next();
-                    },
+                    }
                     event::MouseEventKind::ScrollUp => {
                         app.previous();
                         app.previous();
                         app.previous();
-                    },
+                    }
                     event::MouseEventKind::Down(event::MouseButton::Left) if !app.is_searching => {
                         if let Ok(size) = terminal.size() {
                             ui::handle_header_click(app, mouse.column, mouse.row, size.width);
                         }
-                    },
+                    }
                     _ => {}
                 },
                 _ => {}

@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
+use std::fmt::Write;
 use std::time::{Duration, Instant, SystemTime};
-use sysinfo::{Pid, ProcessStatus};
+use sysinfo::{Pid, Process, ProcessStatus, Uid, UpdateKind};
 
 // ponytail: named thresholds instead of raw magic numbers
 pub(crate) const IDLE_CPU_THRESHOLD: f32 = 0.1;
@@ -57,7 +58,10 @@ pub struct App {
     pub dirty: bool,
     pub message_instant: Option<Instant>,
     pub confirming_kill_all: bool,
+    pub wasteful_targets: Vec<Pid>,
     last_kill_instant: Option<Instant>,
+    child_processes: Vec<std::process::Child>,
+    current_effective_uid: Option<Uid>,
 }
 
 impl Default for App {
@@ -69,7 +73,12 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         let sys = sysinfo::System::new_all();
-        
+
+        let current_effective_uid = sysinfo::get_current_pid()
+            .ok()
+            .and_then(|pid| sys.process(pid))
+            .and_then(|p| p.effective_user_id().cloned());
+
         let mut table_state = TableState::default();
         table_state.select(Some(0));
 
@@ -81,7 +90,7 @@ impl App {
             // ponytail: fail-safe — fall back to now instead of 1970-era nonsense
             SystemTime::now()
         };
-        
+
         let mut app = Self {
             sys,
             processes: Vec::new(),
@@ -101,11 +110,14 @@ impl App {
             dirty: true,
             message_instant: None,
             confirming_kill_all: false,
+            wasteful_targets: Vec::new(),
             last_kill_instant: None,
+            child_processes: Vec::new(),
+            current_effective_uid,
             is_searching: false,
             search_query: String::new(),
         };
-        
+
         // populate initial data immediately
         // ponytail: skip the CPU-delta sleep — first tick will compute real values
         app.refresh();
@@ -117,33 +129,40 @@ impl App {
         self.sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
-            // ponytail: only cpu+mem, skip disk/user/tasks/env etc
+            // ponytail: only cpu+mem+user, skip disk/tasks/env etc
             sysinfo::ProcessRefreshKind::nothing()
                 .with_cpu()
                 .with_memory()
-                .without_tasks()
+                .with_user(UpdateKind::OnlyIfNotSet)
+                .without_tasks(),
         );
         self.update_system_stats();
 
-        self.all_processes = self.sys.processes().iter().map(|(pid, process)| {
-            ProcessInfo {
-                pid: *pid,
-                name: process.name().to_string_lossy().to_string(),
-                name_lower: process.name().to_string_lossy().to_lowercase(),
-                cpu: process.cpu_usage(),
-                mem_mb: process.memory() as f64 / 1024.0 / 1024.0,
-                status: match process.status() {
-                    ProcessStatus::Run => "Running",
-                    ProcessStatus::Sleep => "Sleeping",
-                    ProcessStatus::Stop => "Stopped",
-                    ProcessStatus::Zombie => "Zombie",
-                    ProcessStatus::Idle => "Idle",
-                    // ponytail: Parked (macOS halted-at-clean-point) mapped as Idle
-                    ProcessStatus::Parked => "Idle",
-                    _ => "Other",
-                }.to_string(),
-            }
-        }).collect();
+        self.all_processes = self
+            .sys
+            .processes()
+            .iter()
+            .map(|(pid, process)| {
+                ProcessInfo {
+                    pid: *pid,
+                    name: process.name().to_string_lossy().to_string(),
+                    name_lower: process.name().to_string_lossy().to_lowercase(),
+                    cpu: process.cpu_usage(),
+                    mem_mb: process.memory() as f64 / 1024.0 / 1024.0,
+                    status: match process.status() {
+                        ProcessStatus::Run => "Running",
+                        ProcessStatus::Sleep => "Sleeping",
+                        ProcessStatus::Stop => "Stopped",
+                        ProcessStatus::Zombie => "Zombie",
+                        ProcessStatus::Idle => "Idle",
+                        // ponytail: Parked (macOS halted-at-clean-point) mapped as Idle
+                        ProcessStatus::Parked => "Idle",
+                        _ => "Other",
+                    }
+                    .to_string(),
+                }
+            })
+            .collect();
     }
 
     /// Filter + sort from all_processes (in-memory, no I/O)
@@ -152,13 +171,19 @@ impl App {
         let search_pattern = self.search_query.to_lowercase();
 
         // Save selected PID before filtering/sorting so selection follows the process
-        let selected_pid = self.table_state.selected()
+        let selected_pid = self
+            .table_state
+            .selected()
             .and_then(|i| self.processes.get(i))
             .map(|p| p.pid);
 
-        self.processes = self.all_processes.iter().filter(|p| {
-            search_pattern.is_empty() || p.name_lower.contains(&search_pattern)
-        }).cloned().collect();
+        self.processes.clear();
+        self.processes.extend(
+            self.all_processes
+                .iter()
+                .filter(|p| search_pattern.is_empty() || p.name_lower.contains(&search_pattern))
+                .cloned(),
+        );
 
         self.processes.sort_by(|a, b| {
             let ordering = match self.sort_column {
@@ -182,13 +207,19 @@ impl App {
         // Restore selection by PID so the same process stays highlighted after sort
         let new_selected = selected_pid
             .and_then(|pid| self.processes.iter().position(|p| p.pid == pid))
-            .or(if self.processes.is_empty() { None } else { Some(0) });
+            .or(if self.processes.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
         self.table_state.select(new_selected);
     }
 
     pub fn refresh(&mut self) {
+        self.reap_children();
         // Keep messages visible for at least 4 seconds
-        let expired = self.message_instant
+        let expired = self
+            .message_instant
             .map(|t| t.elapsed() >= Duration::from_secs(4))
             .unwrap_or(true);
         if expired {
@@ -197,6 +228,23 @@ impl App {
         }
         self.refresh_data();
         self.apply_filter();
+    }
+
+    fn reap_children(&mut self) {
+        let mut i = 0;
+        while i < self.child_processes.len() {
+            match self.child_processes[i].try_wait() {
+                Ok(None) => i += 1,
+                Ok(Some(_)) => {
+                    let _ = self.child_processes.remove(i).wait();
+                }
+                Err(_) => {
+                    // If we cannot determine the state, reap the handle to avoid
+                    // zombies without blocking the UI.
+                    let _ = self.child_processes.remove(i).wait();
+                }
+            }
+        }
     }
 
     fn update_system_stats(&mut self) {
@@ -236,6 +284,7 @@ impl App {
             }
             None => 0,
         };
+        let i = i.min(self.processes.len().saturating_sub(1));
         self.table_state.select(Some(i));
     }
 
@@ -254,6 +303,7 @@ impl App {
             }
             None => 0,
         };
+        let i = i.min(self.processes.len().saturating_sub(1));
         self.table_state.select(Some(i));
     }
 
@@ -273,19 +323,18 @@ impl App {
             return;
         }
 
-        let selected_info = self.table_state.selected()
+        let selected_info = self
+            .table_state
+            .selected()
             .and_then(|i| self.processes.get(i))
             .map(|p| (p.name.clone(), p.pid));
 
-        let Some((ref name, pid)) = selected_info else {
+        let Some((name, pid)) = selected_info else {
             self.refresh();
             self.message = Some("No process selected".to_string());
             self.message_instant = Some(Instant::now());
             return;
         };
-
-        // Clone what we need before any mutable borrow
-        let name = name.clone();
 
         // Protect critical system PIDs and self
         if is_protected_pid(pid) {
@@ -299,7 +348,27 @@ impl App {
             return;
         }
 
+        if is_protected_name(&name) {
+            self.message = Some(format!(
+                "Refusing to kill protected process {} ({})",
+                name,
+                pid.as_u32()
+            ));
+            self.message_instant = Some(Instant::now());
+            return;
+        }
+
         if let Some(process) = self.sys.process(pid) {
+            if is_kernel_thread(process)
+                || !is_owned_by_current_user(self.current_effective_uid.as_ref(), process)
+            {
+                self.message = Some(format!(
+                    "Refusing to kill {} ({}): not owned or protected",
+                    name, pid
+                ));
+                self.message_instant = Some(Instant::now());
+                return;
+            }
             let killed = process.kill();
             if killed {
                 self.refresh();
@@ -311,13 +380,20 @@ impl App {
                 self.message = Some(if gone {
                     format!("Process {} ({}) already ended", name, pid)
                 } else {
-                    format!("Failed to kill process {} ({}). Try running with sudo?", name, pid)
+                    format!(
+                        "Failed to kill process {} ({}). Try running with sudo?",
+                        name, pid
+                    )
                 });
                 self.message_instant = Some(Instant::now());
             }
         } else {
             self.refresh();
-            self.message = Some(format!("Process {} ({}) no longer exists", name, pid.as_u32()));
+            self.message = Some(format!(
+                "Process {} ({}) no longer exists",
+                name,
+                pid.as_u32()
+            ));
             self.message_instant = Some(Instant::now());
         }
     }
@@ -373,75 +449,95 @@ impl App {
     }
 
     pub fn open_search(&mut self) {
-        let Some(target) = self.table_state.selected().and_then(|i| self.processes.get(i)) else {
+        let Some(target) = self
+            .table_state
+            .selected()
+            .and_then(|i| self.processes.get(i))
+        else {
             self.message = Some("No process selected to search for".to_string());
             self.message_instant = Some(Instant::now());
             return;
         };
         self.dirty = true;
         let query = url_encode_query(&target.name);
-        
+
         let (os_cmd, os_args, os_tag) = if cfg!(target_os = "windows") {
-            ("cmd", vec!["/C", "start"], "windows")
+            // Avoid cmd.exe %VAR% expansion by using rundll32 URL handler.
+            ("rundll32", vec!["url.dll,FileProtocolHandler"], "windows")
         } else if cfg!(target_os = "macos") {
             ("open", vec![], "mac")
         } else {
             ("xdg-open", vec![], "linux")
         };
 
-        let url = format!("https://www.google.com/search?q={}+process+{}", query, os_tag);
-        
+        let url = format!(
+            "https://www.google.com/search?q={}+process+{}",
+            query, os_tag
+        );
+
         let mut cmd = std::process::Command::new(os_cmd);
         for arg in os_args {
             cmd.arg(arg);
         }
-        
-        if let Err(e) = cmd.arg(&url).spawn() {
-            self.message = Some(format!("Failed to open browser: {}", e));
-            self.message_instant = Some(Instant::now());
-        } else {
-            self.message = Some(format!("Searching for process: {}", target.name));
-            self.message_instant = Some(Instant::now());
+
+        match cmd.arg(&url).spawn() {
+            Ok(child) => {
+                self.child_processes.push(child);
+                self.message = Some(format!("Searching for process: {}", target.name));
+                self.message_instant = Some(Instant::now());
+            }
+            Err(e) => {
+                self.message = Some(format!("Failed to open browser: {}", e));
+                self.message_instant = Some(Instant::now());
+            }
         }
     }
 
-
     pub fn kill_all_wasteful(&mut self) {
-        // Confirmation: first press sets flag, second press executes
         if !self.confirming_kill_all {
+            self.wasteful_targets = self.find_wasteful_targets();
             self.confirming_kill_all = true;
-            self.message = Some("Press K again to confirm killing all wasteful processes".to_string());
+            self.message = Some(if self.wasteful_targets.is_empty() {
+                "No wasteful processes found to clean up".to_string()
+            } else {
+                let names = self
+                    .wasteful_targets
+                    .iter()
+                    .take(5)
+                    .map(|pid| {
+                        self.sys
+                            .process(*pid)
+                            .map(|p| p.name().to_string_lossy().to_string())
+                            .unwrap_or_else(|| pid.to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let extra = if self.wasteful_targets.len() > 5 {
+                    format!(" and {} more", self.wasteful_targets.len() - 5)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "Press K again to kill {}: {}{}",
+                    self.wasteful_targets.len(),
+                    names,
+                    extra
+                )
+            });
             self.message_instant = Some(Instant::now());
             return;
         }
         self.confirming_kill_all = false;
 
-        let own_pid = sysinfo::get_current_pid().ok();
-        let mut killed_count = 0;
-        let mut targets: Vec<Pid> = Vec::new();
-
-        // Identify wasteful processes first to avoid borrow checker issues with sys.processes()
-        for (pid, process) in self.sys.processes() {
-            // Never target self or protected PIDs
-            if Some(*pid) == own_pid || is_protected_pid(*pid) {
-                continue;
-            }
-            let cpu = process.cpu_usage();
-            let status = process.status();
-            let mem_mb = process.memory() as f64 / 1024.0 / 1024.0;
-            
-            // ponytail: Parked is macOS halted-at-clean-point, treated as idle
-            let is_idle = cpu < IDLE_CPU_THRESHOLD && matches!(status,
-                ProcessStatus::Sleep | ProcessStatus::Idle | ProcessStatus::Parked
-            );
-            if is_idle && mem_mb > WASTEFUL_MEM_MB {
-                targets.push(*pid);
-            }
-        }
-
+        // Recompute targets at confirmation time to avoid stale PIDs / reuse.
+        let targets = self.find_wasteful_targets();
+        self.wasteful_targets.clear();
         let found_count = targets.len();
+        let mut killed_count = 0;
         for pid in targets {
-            if let Some(process) = self.sys.process(pid) && process.kill() {
+            if let Some(process) = self.sys.process(pid)
+                && process.kill()
+            {
                 killed_count += 1;
             }
         }
@@ -451,26 +547,176 @@ impl App {
             if killed_count == found_count {
                 format!("Cleaned up {} wasteful processes", killed_count)
             } else {
-                format!("Killed {}/{} wasteful processes ({} already exited)", killed_count, found_count, found_count - killed_count)
+                format!(
+                    "Killed {}/{} wasteful processes ({} already exited)",
+                    killed_count,
+                    found_count,
+                    found_count - killed_count
+                )
             }
         } else if found_count > 0 {
-            format!("Could not kill any of {} wasteful processes (check permissions)", found_count)
+            format!(
+                "Could not kill any of {} wasteful processes (check permissions)",
+                found_count
+            )
         } else {
             "No wasteful processes found to clean up".to_string()
         });
         self.message_instant = Some(Instant::now());
     }
+
+    /// Identify idle but memory-heavy processes, excluding protected PIDs and known safe apps.
+    fn find_wasteful_targets(&self) -> Vec<Pid> {
+        let own_pid = sysinfo::get_current_pid().ok();
+        let mut targets = Vec::new();
+        for (pid, process) in self.sys.processes() {
+            if Some(*pid) == own_pid
+                || is_protected_pid(*pid)
+                || is_kernel_thread(process)
+                || !is_owned_by_current_user(self.current_effective_uid.as_ref(), process)
+            {
+                continue;
+            }
+            let name = process.name().to_string_lossy().to_string();
+            if is_protected_name(&name) {
+                continue;
+            }
+            let cpu = process.cpu_usage();
+            let status = process.status();
+            let mem_mb = process.memory() as f64 / 1024.0 / 1024.0;
+
+            // Parked is macOS halted-at-clean-point, treated as idle
+            let is_idle = cpu < IDLE_CPU_THRESHOLD
+                && matches!(
+                    status,
+                    ProcessStatus::Sleep | ProcessStatus::Idle | ProcessStatus::Parked
+                );
+            if is_idle && mem_mb > WASTEFUL_MEM_MB {
+                targets.push(*pid);
+            }
+        }
+        targets
+    }
 }
 
-/// Skip PID 0, 1 (kernel/init/system-critical) and let caller handle self-pid.
+/// Skip PID 0, 1, 2 (kernel/init/kthreadd) and let caller handle self-pid.
 fn is_protected_pid(pid: Pid) -> bool {
     let raw = pid.as_u32();
-    raw == 0 || raw == 1
+    raw <= 2
 }
 
-/// ponytail: minimal URL query encoding for search terms, no external crate
+fn is_kernel_thread(process: &Process) -> bool {
+    let name = process.name().to_string_lossy();
+    let is_kt = name.starts_with('[') && name.ends_with(']');
+    let is_kthreadd_child = process.parent() == Some(Pid::from(2usize));
+    is_kt || is_kthreadd_child
+}
+
+fn is_owned_by_current_user(current: Option<&Uid>, process: &Process) -> bool {
+    match (current, process.effective_user_id()) {
+        (Some(cur), Some(proc)) => cur == proc,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+// Known safe processes that should not be bulk-killed: terminals, shells, window/DE/dock, browsers, editors, messengers.
+const PROTECTED_NAMES: &[&str] = &[
+    "kernel",
+    "init",
+    "system",
+    "systemd",
+    "launchd",
+    "svchost",
+    "csrss",
+    "wininit",
+    "smss",
+    "winlogon",
+    "services",
+    "lsass",
+    "dwm",
+    "audiodg",
+    "spoolsv",
+    "taskhost",
+    "dllhost",
+    "fontdrvhost",
+    "searchindexer",
+    "securityhealthservice",
+    "waasmedic",
+    "wermgr",
+    "msmpeng",
+    "loginwindow",
+    "windowserver",
+    "dock",
+    "finder",
+    "alacritty",
+    "wezterm",
+    "wezterm-gui",
+    "kitty",
+    "konsole",
+    "gnome-shell",
+    "kwin",
+    "kwin_x11",
+    "plasmashell",
+    "xfwm4",
+    "i3",
+    "sway",
+    "dwm",
+    "explorer",
+    "powershell",
+    "pwsh",
+    "cmd",
+    "terminal",
+    "windowsterminal",
+    "iterm2",
+    "iterm",
+    "hyper",
+    "tabby",
+    "terminator",
+    "tilix",
+    "xterm",
+    "rxvt",
+    "urxvt",
+    "st",
+    "foot",
+    "qterminal",
+    "yakuake",
+    "tilda",
+    "guake",
+    "chrome",
+    "google chrome",
+    "firefox",
+    "safari",
+    "msedge",
+    "edge",
+    "code",
+    "code-oss",
+    "vim",
+    "nvim",
+    "neovide",
+    "emacs",
+    "xcode",
+    "notes",
+    "notion",
+    "discord",
+    "slack",
+    "teams",
+    "wechat",
+    "telegram",
+    "spotify",
+];
+
+fn is_protected_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    PROTECTED_NAMES.iter().any(|&p| {
+        name.split(|c: char| !c.is_alphanumeric())
+            .any(|part| part == p)
+    })
+}
+
+/// Minimal URL query encoding for search terms, no external crate.
 fn url_encode_query(s: &str) -> String {
-    // ponytail: len*3 to avoid reallocation when non-ASCII bytes expand to %XX
+    // len*3 to avoid reallocation when non-ASCII bytes expand to %XX
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
@@ -478,8 +724,41 @@ fn url_encode_query(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(char::from(b))
             }
-            _ => out.push_str(&format!("%{:02X}", b)),
+            _ => {
+                // String's fmt::Write never errors for this size.
+                let _ = write!(out, "%{:02X}", b);
+            }
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_protected_name, is_protected_pid, url_encode_query};
+    use sysinfo::Pid;
+
+    #[test]
+    fn protected_pids() {
+        assert!(is_protected_pid(Pid::from(0usize)));
+        assert!(is_protected_pid(Pid::from(1usize)));
+        assert!(!is_protected_pid(Pid::from(1234usize)));
+    }
+
+    #[test]
+    fn protected_names_tokenized() {
+        assert!(is_protected_name("Google Chrome"));
+        assert!(is_protected_name("chrome.exe"));
+        assert!(is_protected_name("kernel_task"));
+        assert!(is_protected_name("terminal"));
+        assert!(!is_protected_name("xterminal"));
+        assert!(!is_protected_name("my_custom_app"));
+    }
+
+    #[test]
+    fn url_encode_basic() {
+        assert_eq!(url_encode_query("Google Chrome"), "Google+Chrome");
+        assert_eq!(url_encode_query("hello&world"), "hello%26world");
+        assert_eq!(url_encode_query("café"), "caf%C3%A9");
+    }
 }

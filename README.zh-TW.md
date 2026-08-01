@@ -2,81 +2,115 @@
 
 # Idlekiller
 
-一個基於 Rust 的 TUI 進程管理工具，專為識別與清理不必要消耗系統資源的進程而設計。
+一個以 Rust 打造的 TUI 進程管理工具，用來識別並清理占用過多系統資源的進程。
 
----
+## 功能
 
-## 1️⃣ 如何安裝
+- 即時顯示進程列表，包含 CPU、記憶體與狀態
+- 可依任何欄位排序（`Tab` / `Shift + Tab`，`r` 反轉排序）
+- 在程式內依名稱過濾進程（`f` 或 `/`）
+- 一鍵清理閒置但佔用大量記憶體的進程（`Shift + K`）
+- 在瀏覽器搜尋選中的進程資訊（`s`）
+- 支援滑鼠：捲動與點擊欄位標題排序
+- 內建保護系統進程與自身進程
+
+## 需求
+
+- Rust 1.85 或更新版本
+- 至少 80x24 的終端機
+
+## 安裝
+
+### 一鍵安裝（macOS / Linux）
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Poseidoncode/Idlekiller/main/install.sh | bash
+```
+
+> 如果你不想直接 pipe 到 `bash`，可以先查看 [install.sh](./install.sh) 腳本內容。
+
+### 從原始碼編譯
+
+```bash
+git clone https://github.com/Poseidoncode/Idlekiller.git
+cd Idlekiller
+cargo build --release
+```
+
+編譯完成後，執行檔位於 `target/release/idlekiller`。
 
 ### Windows
 
+使用 PowerShell 一鍵安裝（需先安裝 Rust）：
+
 ```powershell
-# 1. 下載並解壓縮釋出檔
-git clone https://github.com/Poseidoncode/Idlekiller.git
-cd Idlekiller
-
-# 2. 編譯（需先安裝 Rust）
-cargo build --release
-
-# 3. 將執行檔移至你偏好的資料夾 (例如 C:\Software\Idlekiller\)
-copy target\release\idlekiller.exe C:\妳想放的路徑\Idlekiller\
+irm https://raw.githubusercontent.com/Poseidoncode/Idlekiller/main/install.ps1 | iex
 ```
+
+> 如果你不想直接 pipe 到 `iex`，可以先查看 [install.ps1](./install.ps1)  腳本內容。
 
 ### macOS
 
-```bash
-# 方式 A：從原始碼編譯
-git clone https://github.com/Poseidoncode/Idlekiller.git
-cd Idlekiller
-cargo build --release
-sudo cp target/release/idlekiller /usr/local/bin/
+安裝到系統路徑：
 
-# 方式 B：打包成 .app（圖示啟動）
+```bash
+sudo cp target/release/idlekiller /usr/local/bin/
+```
+
+或打包成可雙擊開啟的 `.app`：
+
+```bash
 make app
-# 生成 Idlekiller.app，拖到 Applications 即可
+# 然後將 Idlekiller.app 拖入 /Applications
 ```
 
 ### Linux
 
 ```bash
-# 1. 從原始碼編譯
-git clone https://github.com/Poseidoncode/Idlekiller.git
-cd Idlekiller
-cargo build --release
-
-# 2. 安裝到系統路徑
 sudo cp target/release/idlekiller /usr/local/bin/
 ```
 
----
-
-## 2️⃣ 如何使用
-
-### 啟動程式
+## 使用方式
 
 ```bash
 idlekiller
 ```
 
-或在 macOS 上直接點擊 `Idlekiller.app`。
+在 macOS 上也可以從 Launchpad 或 Finder 開啟 `Idlekiller.app`。
 
-### 操作說明
+## 操作說明
 
-| 按鍵                  | 功能                       |
-| --------------------- | -------------------------- |
-| ↑ / ↓ / **K** / **J** | 上下移動選擇進程           |
-| **Enter** / **X**     | 終止所選進程 (Kill)        |
-| **f** / **/**         | 根據名稱搜尋/過濾進程      |
-| **Shift + K**         | **一鍵清理潛在資源浪費者** |
-| **S**                 | 在瀏覽器搜尋該進程資訊     |
-| **Q** / **Esc**       | 退出工具                   |
+| 按鍵 | 功能 |
+| --- | --- |
+| `↑` / `↓` / `k` / `j` | 上下移動選擇 |
+| `Enter` / `x` | 終止選中的進程 |
+| `f` / `/` | 依名稱過濾進程 |
+| `Shift + K` | 一鍵清理資源浪費者（需按兩次確認） |
+| `s` | 用 Google 搜尋該進程 |
+| `Tab` / `Shift + Tab` | 切換排序欄位（順向 / 反向） |
+| `r` | 反轉目前排序方向 |
+| `q` / `Esc` | 退出 |
 
----
+滑鼠操作：
 
-## 3️⃣ 智能識別系統
+- 捲動：在列表中上下移動
+- 點擊欄位標題：依該欄位排序
 
-Idlekiller 會自動標示潛在的資源浪費者（顯示為**黃色**）：
-- **觸發條件**：程序處於 `Sleeping` 或 `Idle` 狀態，且 CPU < 0.1%，但記憶體佔用超過 **50MB**。
-- **處理建議**：如果您確定該程序目前不需要使用，可以使用 `Shift + K` 一鍵清理，以釋放系統資源。
+## 清理規則
 
----
+當進程符合以下條件時，會被標示為資源浪費者（以黃色顯示）：
+
+- 狀態為 `Sleeping`、`Idle` 或 `Parked`
+- CPU 使用率低於 `0.1%`
+- 記憶體佔用超過 `500 MB`
+
+按兩次 `Shift + K` 即可終止所有符合條件的進程。`0`、`1` 號 PID 與 Idlekiller 自身會受到保護，不會被終止。
+
+## 開發
+
+```bash
+cargo run           # 開發模式執行
+cargo test          # 執行邏輯與效能測試
+cargo build --release
+make app            # 打包 macOS .app
+```

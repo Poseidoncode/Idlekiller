@@ -2,9 +2,20 @@
 name = "idlekiller"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.86"
+authors = ["Poseidoncode"]
+description = "A Rust-based TUI process manager for identifying and cleaning up resource-heavy processes"
+repository = "https://github.com/Poseidoncode/Idlekiller"
+readme = "README.md"
 
 [dependencies]
 crossterm = "0.29.0"
 ratatui = "0.30.0"
 sysinfo = "0.38.3"
+
+[[bench]]
+name = "bench"
+path = "benches/bench.rs"
+harness = false
+
+
