@@ -1,43 +1,49 @@
 use crate::app::{App, SortColumn, SortDirection};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Cell, LineGauge, Paragraph, Row, Table, Wrap},
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Color System — Derived from core Tech-Blue RGB(0,200,255)
-//  All values hand-picked via color theory; no template/Tailwind colors used.
+//  Color System — Commercial palette: Tech-Blue core + Silver accent layer
+//  Inspired by enterprise monitoring dashboards (Datadog, Grafana dark mode).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Core tech-blue: electric, CRT-screen feel
-const C_TECH:     Color = Color::Rgb(0,   200, 255);
+/// Core tech-blue: electric signature color
+const C_TECH:     Color = Color::Rgb(  0, 190, 255);
 /// Deep variant: denser blue for depth contrast
-const C_DEEP:     Color = Color::Rgb(0,   110, 210);
-/// Ice highlight: lighter than core, used for sorted columns / focus
-const C_ICE:      Color = Color::Rgb(140, 230, 255);
-/// Phosphor-green: warm/cool contrast with the blue; terminal "active" signal
-const C_PHOS:     Color = Color::Rgb(0,   225, 110);
-/// Amber-warning: split-complementary to tech-blue (~30° from orange)
-const C_AMBER:    Color = Color::Rgb(255, 185,  20);
-/// Coral-danger: full complement pop, only for critical states
-const C_CORAL:    Color = Color::Rgb(255,  70,  50);
+const C_DEEP:     Color = Color::Rgb(  0, 100, 200);
+/// Ice highlight: sorted columns / focus state
+const C_ICE:      Color = Color::Rgb(160, 235, 255);
+/// Phosphor-green: warm/cool contrast, terminal "active" signal
+const C_PHOS:     Color = Color::Rgb(  0, 215, 105);
+/// Amber-warning: split-complementary to tech-blue
+const C_AMBER:    Color = Color::Rgb(255, 180,  25);
+/// Coral-danger: full complement pop, critical states only
+const C_CORAL:    Color = Color::Rgb(255,  65,  55);
+/// Silver-accent: the commercial differentiator — warm neutral for labels
+const C_SILVER:   Color = Color::Rgb(185, 200, 215);
 /// Steel-muted: desaturated blue-gray for secondary text
-const C_STEEL:    Color = Color::Rgb( 85, 120, 160);
-/// Slate-dim: very dark blue, border chrome
-const C_SLATE:    Color = Color::Rgb( 18,  38,  70);
+const C_STEEL:    Color = Color::Rgb( 80, 115, 155);
+/// Slate-dim: dark blue-gray, border chrome
+const C_SLATE:    Color = Color::Rgb( 22,  44,  80);
+/// Slate-mid: slightly lighter for accent borders
+const C_SLATE_MID:Color = Color::Rgb( 30,  58, 100);
 /// Abyss-bg: near-black with blue undertone (even rows)
-const C_ABYSS:    Color = Color::Rgb(  5,  10,  22);
+const C_ABYSS:    Color = Color::Rgb(  4,   9,  20);
 /// Surface-bg: slightly lighter panel (odd rows / header chrome)
-const C_SURFACE:  Color = Color::Rgb( 10,  20,  42);
+const C_SURFACE:  Color = Color::Rgb(  9,  18,  40);
+/// Elevated-bg: header row background
+const C_ELEVATED: Color = Color::Rgb( 14,  28,  58);
 /// Selected highlight: deep blue glow without washing out text
-const C_SEL_BG:   Color = Color::Rgb(  0,  40,  90);
-/// Primary text: blue-tinted off-white so it harmonises with the palette
-const C_TEXT:     Color = Color::Rgb(215, 235, 248);
-/// Dim text: readable mid-tone that won't compete with highlights
-const C_DIM_TXT:  Color = Color::Rgb( 95, 130, 165);
+const C_SEL_BG:   Color = Color::Rgb(  0,  38,  88);
+/// Primary text: blue-tinted off-white
+const C_TEXT:     Color = Color::Rgb(218, 235, 250);
+/// Dim text: readable mid-tone
+const C_DIM_TXT:  Color = Color::Rgb( 85, 120, 155);
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Layout constants
@@ -59,9 +65,9 @@ pub const COL_MEM_WIDTH:      u16 = 15;
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn clean_name(name: &str) -> String {
-    // ponytail: strip control chars to prevent terminal escape injection
+    // strip control chars to prevent terminal escape injection
     let clean: String = name.chars().filter(|c| !c.is_control()).collect();
-    // ponytail: char count avoids panic on multi-byte boundary
+    // char count avoids panic on multi-byte boundary
     if clean.chars().count() > 80 {
         format!("{}…", clean.chars().take(79).collect::<String>())
     } else {
@@ -88,11 +94,11 @@ pub fn handle_header_click(app: &mut App, col_x: u16, row_y: u16, term_width: u1
         .max(COL_NAME_MIN_WIDTH);
 
     let cols: [(u16, SortColumn); 5] = [
-        (COL_PID_WIDTH,   SortColumn::Pid),
-        (name_w,          SortColumn::Name),
-        (COL_STATUS_WIDTH,SortColumn::Status),
-        (COL_CPU_WIDTH,   SortColumn::Cpu),
-        (COL_MEM_WIDTH,   SortColumn::Memory),
+        (COL_PID_WIDTH,    SortColumn::Pid),
+        (name_w,           SortColumn::Name),
+        (COL_STATUS_WIDTH, SortColumn::Status),
+        (COL_CPU_WIDTH,    SortColumn::Cpu),
+        (COL_MEM_WIDTH,    SortColumn::Memory),
     ];
 
     let mut x = 1u16;
@@ -127,77 +133,88 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Header
+//  Header — commercial branding with version tag
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn draw_header(f: &mut Frame, area: Rect) {
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
-            "[ ",
-            Style::default().fg(C_SLATE).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "IDLE",
+            "  IDLE",
             Style::default()
-                .fg(C_TECH)
+                .fg(C_TEXT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "KILLER",
             Style::default()
-                .fg(C_DEEP)
+                .fg(C_TECH)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " ]",
-            Style::default().fg(C_SLATE).add_modifier(Modifier::BOLD),
+            "  ·  ",
+            Style::default().fg(C_SLATE_MID),
         ),
         Span::styled(
-            "  //  Process Monitor & Cleaner",
+            "Process Monitor & Cleaner",
+            Style::default().fg(C_SILVER),
+        ),
+        Span::styled(
+            "  ·  ",
+            Style::default().fg(C_SLATE_MID),
+        ),
+        Span::styled(
+            "v0.1",
             Style::default().fg(C_STEEL),
+        ),
+        Span::styled(
+            "  ",
+            Style::default(),
         ),
     ]))
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(BorderType::Thick)
             .border_style(Style::default().fg(C_DEEP)),
     )
-    .centered();
+    .alignment(Alignment::Center);
 
     f.render_widget(title, area);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  System Stats
+//  System Stats — cleaner label hierarchy with process count
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
     let stats = &app.system_stats;
 
-    // Uptime
+    // Uptime formatting
     let days    = stats.uptime_seconds / 86400;
     let hours   = (stats.uptime_seconds % 86400) / 3600;
     let minutes = (stats.uptime_seconds % 3600) / 60;
     let seconds = stats.uptime_seconds % 60;
     let uptime_str = if days > 0 {
-        format!("{}d {:02}h {:02}m {:02}s", days, hours, minutes, seconds)
-    } else if hours > 0 {
-        format!("{:02}h {:02}m {:02}s", hours, minutes, seconds)
+        format!("{}d {:02}:{:02}:{:02}", days, hours, minutes, seconds)
     } else {
-        format!("{:02}m {:02}s", minutes, seconds)
+        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
     };
 
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(C_SLATE))
+        .border_style(Style::default().fg(C_SLATE_MID))
         .title(Line::from(vec![
+            Span::styled(" ", Style::default()),
             Span::styled(
-                " System Overview ",
+                "SYSTEM",
                 Style::default()
-                    .fg(C_TECH)
+                    .fg(C_SILVER)
                     .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " OVERVIEW ",
+                Style::default().fg(C_STEEL),
             ),
         ]));
     let inner_area = outer.inner(area);
@@ -206,12 +223,11 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
     // ── CPU gauge ──────────────────────────────────────────────────────────
     let cpu_val   = stats.cpu_usage;
     let cpu_ratio = (cpu_val.clamp(0.0, 100.0) / 100.0) as f64;
-    // Danger at >80 → coral (split-complement), caution at >50 → amber, else tech-blue
     let cpu_color = if cpu_val > 80.0 { C_CORAL } else if cpu_val > 50.0 { C_AMBER } else { C_TECH };
 
     let cpu_gauge = LineGauge::default()
         .block(Block::default().title(Line::from(vec![
-            Span::styled(" CPU ", Style::default().fg(C_STEEL)),
+            Span::styled("CPU  ", Style::default().fg(C_SILVER).add_modifier(Modifier::BOLD)),
         ])))
         .filled_style(Style::default().fg(cpu_color).add_modifier(Modifier::BOLD))
         .unfilled_style(Style::default().fg(C_SLATE))
@@ -229,12 +245,11 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         0.0
     };
-    // Same colour logic: >80% coral, >60% amber, else phosphor-green (contrast with blue)
     let ram_color = if ram_ratio > 0.8 { C_CORAL } else if ram_ratio > 0.6 { C_AMBER } else { C_PHOS };
 
     let ram_gauge = LineGauge::default()
         .block(Block::default().title(Line::from(vec![
-            Span::styled(" MEM ", Style::default().fg(C_STEEL)),
+            Span::styled("MEM  ", Style::default().fg(C_SILVER).add_modifier(Modifier::BOLD)),
         ])))
         .filled_style(Style::default().fg(ram_color).add_modifier(Modifier::BOLD))
         .unfilled_style(Style::default().fg(C_SLATE))
@@ -244,70 +259,81 @@ fn draw_system_stats(f: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(ram_color).add_modifier(Modifier::BOLD),
         )]));
 
-    // ── Uptime ─────────────────────────────────────────────────────────────
-    let uptime_para = Paragraph::new(vec![
-        Line::from(vec![Span::styled(
-            "UPTIME",
-            Style::default().fg(C_STEEL).add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![Span::styled(
-            uptime_str,
-            Style::default().fg(C_ICE).add_modifier(Modifier::BOLD),
-        )]),
+    // ── Right panel: uptime + process count ────────────────────────────────
+    let proc_count = app.processes.len();
+    let right_para = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("UPTIME  ", Style::default().fg(C_STEEL)),
+            Span::styled(
+                uptime_str,
+                Style::default().fg(C_ICE).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("PROCS   ", Style::default().fg(C_STEEL)),
+            Span::styled(
+                format!("{}", proc_count),
+                Style::default().fg(C_SILVER).add_modifier(Modifier::BOLD),
+            ),
+        ]),
     ])
-    .centered();
+    .alignment(Alignment::Left);
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(38),
-            Constraint::Percentage(38),
-            Constraint::Percentage(24),
+            Constraint::Percentage(37),
+            Constraint::Percentage(37),
+            Constraint::Percentage(26),
         ])
         .split(inner_area);
 
-    f.render_widget(cpu_gauge,   chunks[0]);
-    f.render_widget(ram_gauge,   chunks[1]);
-    f.render_widget(uptime_para, chunks[2]);
+    f.render_widget(cpu_gauge,  chunks[0]);
+    f.render_widget(ram_gauge,  chunks[1]);
+    f.render_widget(right_para, chunks[2]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Process Table
+//  Process Table — premium header with Unicode sort indicators
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
     // ── Column headers ─────────────────────────────────────────────────────
     let col_defs: [(&str, SortColumn); 5] = [
-        ("PID",       SortColumn::Pid),
-        ("Name",      SortColumn::Name),
-        ("Status",    SortColumn::Status),
-        ("CPU %",     SortColumn::Cpu),
-        ("Mem (MB)",  SortColumn::Memory),
+        ("PID",      SortColumn::Pid),
+        ("NAME",     SortColumn::Name),
+        ("STATUS",   SortColumn::Status),
+        ("CPU %",    SortColumn::Cpu),
+        ("MEM (MB)", SortColumn::Memory),
     ];
 
     let header_cells = col_defs.iter().map(|(label, col)| {
         let is_sorted = app.sort_column == *col;
+        // Unicode arrows replace ASCII ^ v — sharper visual language
         let indicator = if is_sorted {
             match app.sort_direction {
-                SortDirection::Asc  => " ^",
-                SortDirection::Desc => " v",
+                SortDirection::Asc  => " ▲",
+                SortDirection::Desc => " ▼",
             }
         } else {
-            ""
+            "  "
         };
-        // Sorted column: ice-highlight. Others: steel so they recede
         let style = if is_sorted {
             Style::default()
                 .fg(C_ICE)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                .bg(C_ELEVATED)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(C_STEEL).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(C_SILVER)
+                .bg(C_ELEVATED)
+                .add_modifier(Modifier::BOLD)
         };
         Cell::from(format!("{}{}", label, indicator)).style(style)
     });
 
     let header = Row::new(header_cells)
-        .style(Style::default().bg(C_SURFACE))
+        .style(Style::default().bg(C_ELEVATED))
         .height(TABLE_HEADER_HEIGHT)
         .bottom_margin(TABLE_MARGIN_BOTTOM);
 
@@ -321,23 +347,16 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
                 && (p.status == "Sleeping" || p.status == "Idle");
             let is_wasteful = is_idle && p.mem_mb > crate::app::WASTEFUL_MEM_MB;
 
-            // Subtle zebra using our two base shades
-            let row_bg = if i % 2 == 0 { C_ABYSS } else { C_SURFACE };
 
-            // Status text + color
+
+            // Status: minimal indicator + concise label
             let (status_label, status_color) = match p.status.as_str() {
-                "Running"            => ("> Run  ", C_PHOS),
-                "Sleeping" | "Sleep" => ("~ Sleep", C_STEEL),
-                "Idle"               => ("- Idle ", C_SLATE),
-                "Zombie"   | "Z"     => ("X Zmb  ", C_CORAL),
-                other                => {
-                    let s = &other[..other.len().min(5)];
-                    // We return a static-like string; format in the cell
-                    let _ = s; // will handle below
-                    ("? ???  ", C_DIM_TXT)
-                }
+                "Running"            => ("● Run   ", C_PHOS),
+                "Sleeping" | "Sleep" => ("○ Sleep ", C_STEEL),
+                "Idle"               => ("· Idle  ", C_DIM_TXT),
+                "Zombie"   | "Z"     => ("✖ Zombi ", C_CORAL),
+                _                    => ("? Other ", C_DIM_TXT),
             };
-            // For unknown statuses, truncate properly
             let status_display = if matches!(
                 p.status.as_str(),
                 "Running" | "Sleeping" | "Sleep" | "Idle" | "Zombie" | "Z"
@@ -358,7 +377,7 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
                 C_DIM_TXT
             };
 
-            // Memory: wasteful → amber; high → deep-blue; normal → dim
+            // Memory: wasteful → amber; high → tech-blue; normal → dim
             let mem_color = if is_wasteful {
                 C_AMBER
             } else if p.mem_mb > 1000.0 {
@@ -367,9 +386,15 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
                 C_DIM_TXT
             };
 
-            // Name: active=text-white, idle=dim, wasteful=amber
-            let name_prefix = if is_wasteful { "! " } else if !is_idle { "> " } else { "  " };
-            let name_color  = if is_wasteful {
+            // Name: active=primary text, idle=dim, wasteful=amber with warning marker
+            let name_prefix = if is_wasteful {
+                "⚠ "
+            } else if !is_idle {
+                "  "
+            } else {
+                "  "
+            };
+            let name_color = if is_wasteful {
                 C_AMBER
             } else if !is_idle {
                 C_TEXT
@@ -379,7 +404,7 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
 
             Row::new(vec![
                 Cell::from(format!("{:>6}", p.pid))
-                    .style(Style::default().fg(C_DIM_TXT)),
+                    .style(Style::default().fg(C_STEEL)),
                 Cell::from(format!("{}{}", name_prefix, clean_name(&p.name)))
                     .style(Style::default().fg(name_color)),
                 Cell::from(status_display)
@@ -393,18 +418,19 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
                         if is_wasteful { Modifier::BOLD } else { Modifier::empty() },
                     )),
             ])
-            .style(Style::default().bg(row_bg))
+            .style(Style::default())
         })
         .collect();
 
     let proc_count = app.processes.len();
     let title = Line::from(vec![
+        Span::styled(" ", Style::default()),
         Span::styled(
-            " Processes ",
-            Style::default().fg(C_TECH).add_modifier(Modifier::BOLD),
+            "PROCESSES",
+            Style::default().fg(C_SILVER).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("[{}] ", proc_count),
+            format!("  {} tasks ", proc_count),
             Style::default().fg(C_STEEL),
         ),
     ]);
@@ -424,7 +450,7 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(C_SLATE))
+            .border_style(Style::default().fg(C_SLATE_MID))
             .title(title),
     )
     .row_highlight_style(
@@ -439,7 +465,7 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Footer
+//  Footer — grouped keybind hints with section separators
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
@@ -451,13 +477,14 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
             .collect();
         (
             Line::from(vec![
-                Span::styled(" SEARCH // ", Style::default().fg(C_AMBER).add_modifier(Modifier::BOLD)),
+                Span::styled(" ⌕ FILTER ", Style::default().fg(C_ABYSS).bg(C_AMBER).add_modifier(Modifier::BOLD)),
+                Span::styled("  ", Style::default()),
                 Span::styled(
                     format!("{}_", safe_q),
                     Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    "   [Esc] Cancel   [Enter] Confirm",
+                    "   Esc Cancel   Enter Confirm",
                     Style::default().fg(C_STEEL),
                 ),
             ]),
@@ -467,29 +494,36 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         let safe_msg: String = msg.chars().filter(|c| !c.is_control()).collect();
         (
             Line::from(vec![
-                Span::styled(" // ", Style::default().fg(C_PHOS)),
+                Span::styled(" ✔ ", Style::default().fg(C_ABYSS).bg(C_PHOS).add_modifier(Modifier::BOLD)),
+                Span::styled("  ", Style::default()),
                 Span::styled(safe_msg, Style::default().fg(C_TEXT)),
-                Span::styled(
-                    "   [Tab/r] Sort  [f] Search  [K] Kill Wasteful  [q] Quit",
-                    Style::default().fg(C_STEEL),
-                ),
             ]),
             C_PHOS,
         )
     } else {
         (
             Line::from(vec![
-                hint("kj/Up/Dn", "Nav"),
-                sep(),
-                hint("Enter/x", "Kill"),
-                sep(),
-                hint("K", "Kill Wasteful"),
-                sep(),
-                hint("f", "Search"),
-                sep(),
-                hint("Tab/r", "Sort"),
-                sep(),
-                hint("q", "Quit"),
+                // Navigate group
+                kbd("↑↓"),
+                act("Nav"),
+                vsep(),
+                kbd("Enter"),
+                act("Kill"),
+                vsep(),
+                kbd("K"),
+                act("Kill Wasteful"),
+                // Search group
+                Span::styled("  │  ", Style::default().fg(C_SLATE_MID)),
+                kbd("f"),
+                act("Filter"),
+                vsep(),
+                kbd("Tab"),
+                act("Sort"),
+                // Quit
+                Span::styled("  │  ", Style::default().fg(C_SLATE_MID)),
+                kbd("q"),
+                act("Quit"),
+                Span::styled(" ", Style::default()),
             ]),
             C_SLATE,
         )
@@ -512,15 +546,27 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[inline]
-fn hint(key: &'static str, action: &'static str) -> Span<'static> {
-    // Key in tech-blue, action in dim — creates clear visual scan path
+fn kbd(key: &'static str) -> Span<'static> {
+    // Key label: bright silver-white so it pops against the dark background
     Span::styled(
-        format!(" [{}] {} ", key, action),
-        Style::default().fg(C_TECH),
+        format!(" {} ", key),
+        Style::default()
+            .fg(C_TEXT)
+            .bg(C_ELEVATED)
+            .add_modifier(Modifier::BOLD),
     )
 }
 
 #[inline]
-fn sep() -> Span<'static> {
-    Span::styled("|", Style::default().fg(C_SLATE))
+fn act(label: &'static str) -> Span<'static> {
+    // Action label: steel — recedes behind the key
+    Span::styled(
+        format!(" {} ", label),
+        Style::default().fg(C_STEEL),
+    )
+}
+
+#[inline]
+fn vsep() -> Span<'static> {
+    Span::styled(" · ", Style::default().fg(C_SLATE_MID))
 }
