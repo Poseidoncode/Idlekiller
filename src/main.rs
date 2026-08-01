@@ -49,9 +49,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Check minimum terminal size
     let size = terminal.size()?;
-    if size.width < 80 || size.height < 24 {
+    if size.width < 50 || size.height < 12 {
         return Err(format!(
-            "Terminal too small: {}x{} (need at least 80x24)",
+            "Terminal too small: {}x{} (need at least 50x12)",
             size.width, size.height
         )
         .into());
@@ -168,8 +168,8 @@ fn run_app<B: ratatui::backend::Backend>(
                 }
                 Event::Resize(w, h) => {
                     app.dirty = true;
-                    if w < 80 || h < 24 {
-                        app.message = Some(format!("Terminal too small: {}x{} (need 80x24)", w, h));
+                    if w < 50 || h < 12 {
+                        app.message = Some(format!("Terminal too small: {}x{} (need 50x12)", w, h));
                         app.message_instant = Some(Instant::now());
                     }
                 }

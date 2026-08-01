@@ -1,14 +1,27 @@
-.PHONY: all help app clean
+.PHONY: all help run test check build app clean
 
 all: help
 
 help:
 	@echo "Available commands:"
-	@echo "  make        - Show this help"
+	@echo "  make run    - Run the TUI application locally (cargo run)"
+	@echo "  make test   - Run unit tests (cargo test)"
+	@echo "  make check  - Check code compilation (cargo check)"
+	@echo "  make build  - Build debug binary (cargo build)"
 	@echo "  make app    - Build release + package Idlekiller.app (drag to /Applications)"
 	@echo "  make clean  - Run cargo clean and remove local Idlekiller.app"
-	@echo ""
-	@echo "Or use cargo directly: cargo run / cargo build --release / cargo clean"
+
+run:
+	cargo run
+
+test:
+	cargo test
+
+check:
+	cargo check
+
+build:
+	cargo build
 
 app:
 	cargo build --release
