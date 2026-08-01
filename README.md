@@ -27,18 +27,6 @@ A Rust-based TUI process manager for identifying and cleaning up resource-heavy 
 curl -sSL https://raw.githubusercontent.com/Poseidoncode/Idlekiller/main/install.sh | bash
 ```
 
-> Review the [install.sh](./install.sh) script first if you prefer not to pipe directly to `bash`.
-
-### Build from source
-
-```bash
-git clone https://github.com/Poseidoncode/Idlekiller.git
-cd Idlekiller
-cargo build --release
-```
-
-The binary is placed at `target/release/idlekiller`.
-
 ### Windows
 
 One-line install with PowerShell (requires Rust):
@@ -47,36 +35,11 @@ One-line install with PowerShell (requires Rust):
 irm https://raw.githubusercontent.com/Poseidoncode/Idlekiller/main/install.ps1 | iex
 ```
 
-> Review [install.ps1](./install.ps1) before running if you prefer not to pipe directly to `iex`.
-
-### macOS
-
-Install to your path:
-
-```bash
-sudo cp target/release/idlekiller /usr/local/bin/
-```
-
-Or package as a clickable `.app`:
-
-```bash
-make app
-# Then drag Idlekiller.app to /Applications
-```
-
-### Linux
-
-```bash
-sudo cp target/release/idlekiller /usr/local/bin/
-```
-
 ## Usage
 
 ```bash
 idlekiller
 ```
-
-On macOS you can also open `Idlekiller.app` from Launchpad or Finder.
 
 ## Controls
 
@@ -106,11 +69,3 @@ A process is flagged as wasteful and shown in yellow when:
 
 Press `Shift + K` twice to terminate all processes matching these rules. PIDs `0`, `1` and the current Idlekiller process are always protected and will not be killed.
 
-## Development
-
-```bash
-cargo run           # Run in development mode
-cargo test          # Run logic and benchmark tests
-cargo build --release
-make app            # Package macOS .app
-```
