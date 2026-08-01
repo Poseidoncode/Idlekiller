@@ -2,72 +2,115 @@
 
 # Idlekiller
 
-A Rust-based TUI process management tool designed to identify and clean up unnecessary processes consuming system resources.
+A Rust-based TUI process manager for identifying and cleaning up resource-heavy processes.
 
----
+## Features
 
-## 1️⃣ Installation
+- Live process table with CPU, memory and status
+- Sort by any column (`Tab` / `Shift + Tab`, `r` to reverse)
+- Filter by name in-app (`f` or `/`)
+- One-click cleanup of idle but memory-heavy processes (`Shift + K`)
+- Search the selected process in your browser (`s`)
+- Mouse support: scroll, click headers to sort
+- Built-in protection for system PIDs and self
+
+## Requirements
+
+- Rust 1.85 or newer
+- A terminal at least 80x24
+
+## Installation
+
+### One-line install (macOS / Linux)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Poseidoncode/Idlekiller/main/install.sh | bash
+```
+
+> Review the [install.sh](./install.sh) script first if you prefer not to pipe directly to `bash`.
+
+### Build from source
+
+```bash
+git clone https://github.com/Poseidoncode/Idlekiller.git
+cd Idlekiller
+cargo build --release
+```
+
+The binary is placed at `target/release/idlekiller`.
 
 ### Windows
 
+One-line install with PowerShell (requires Rust):
+
 ```powershell
-# 1. Download and extract release files
-git clone https://github.com/Poseidoncode/Idlekiller.git
-cd Idlekiller
-
-# 2. Build (requires Rust installed)
-cargo build --release
-
-# 3. Move executable to your preferred folder (e.g., C:\Software\Idlekiller\)
-copy target\release\idlekiller.exe C:\Path\To\Your\Folder\
+irm https://raw.githubusercontent.com/Poseidoncode/Idlekiller/main/install.ps1 | iex
 ```
+
+> Review [install.ps1](./install.ps1) before running if you prefer not to pipe directly to `iex`.
 
 ### macOS
 
-```bash
-# Method A: Build from source
-git clone https://github.com/Poseidoncode/Idlekiller.git
-cd Idlekiller
-cargo build --release
-sudo cp target/release/idlekiller /usr/local/bin/
+Install to your path:
 
-# Method B: Package as .app (icon launcher)
+```bash
+sudo cp target/release/idlekiller /usr/local/bin/
+```
+
+Or package as a clickable `.app`:
+
+```bash
 make app
-# Generates Idlekiller.app, drag to Applications folder
+# Then drag Idlekiller.app to /Applications
 ```
 
 ### Linux
 
 ```bash
-# 1. Build from source
-git clone https://github.com/Poseidoncode/Idlekiller.git
-cd Idlekiller
-cargo build --release
-
-# 2. Install to system path
 sudo cp target/release/idlekiller /usr/local/bin/
 ```
 
----
-
-## 2️⃣ Usage
-
-### Launch the Program
+## Usage
 
 ```bash
 idlekiller
 ```
 
-Or directly click `Idlekiller.app` on macOS.
+On macOS you can also open `Idlekiller.app` from Launchpad or Finder.
 
-### Key Bindings
+## Controls
 
-| ↑ / ↓ / **k** / **j** | Move up/down to select process      |
-| **Enter** / **x**     | Terminate selected process (Kill)   |
-| **f** / **/**         | Filter processes by name (In-app)   |
-| **Shift + K**         | One-click Clean Wasteful Processes  |
-| **s**                 | Search process info in browser      |
-| **q** / **Esc**       | Exit the tool                       |
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` / `k` / `j` | Move selection up / down |
+| `Enter` / `x` | Kill the selected process |
+| `f` / `/` | Filter processes by name |
+| `Shift + K` | Clean up wasteful idle processes (press twice to confirm) |
+| `s` | Search the selected process on Google |
+| `Tab` / `Shift + Tab` | Cycle sort column forward / backward |
+| `r` | Reverse the current sort direction |
+| `q` / `Esc` | Quit |
 
----
+Mouse:
 
+- Scroll to move through the list
+- Click a column header to sort by that column
+
+## How cleanup works
+
+A process is flagged as wasteful and shown in yellow when:
+
+- Status is `Sleeping`, `Idle` or `Parked`
+- CPU usage is below `0.1%`
+- Memory usage is above `500 MB`
+
+Press `Shift + K` twice to terminate all processes matching these rules. PIDs `0`, `1` and the current Idlekiller process are always protected and will not be killed.
+
+## Development
+
+```bash
+cargo run           # Run in development mode
+cargo test          # Run logic and benchmark tests
+cargo build --release
+make app            # Package macOS .app
+```
