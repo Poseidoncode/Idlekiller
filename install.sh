@@ -3,6 +3,12 @@ set -euo pipefail
 
 REPO="Poseidoncode/Idlekiller"
 REF="${IDLEKILLER_REF:-main}"
+# Allow only safe ref characters so REF cannot escape into the URL or the
+# extraction directory below.
+if [[ ! "$REF" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || [[ "$REF" == *".."* ]]; then
+  echo "Invalid IDLEKILLER_REF: '$REF' (allowed: letters, digits, . _ - /)" >&2
+  exit 1
+fi
 URL="https://github.com/$REPO/archive/refs/heads/$REF.tar.gz"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -35,6 +41,10 @@ EOF
   fi
 
   tar -xzf "$archive" -C "$TMP_DIR"
+  if [ ! -d "$TMP_DIR/Idlekiller-$REF" ]; then
+    echo "Unexpected archive layout (ref '$REF' did not produce Idlekiller-$REF)" >&2
+    exit 1
+  fi
   cd "$TMP_DIR/Idlekiller-$REF"
 
   echo "Building..."
