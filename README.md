@@ -17,7 +17,7 @@ A Rust-based TUI process manager for identifying and cleaning up resource-heavy 
 ## Requirements
 
 - Rust 1.85 or newer
-- A terminal at least 80x24
+- A terminal at least 50x12
 
 ## Installation
 
@@ -67,5 +67,5 @@ A process is flagged as wasteful and shown in yellow when:
 - CPU usage is below `0.1%`
 - Memory usage is above `500 MB`
 
-Press `Shift + K` twice to terminate all processes matching these rules. PIDs `0`, `1` and the current Idlekiller process are always protected and will not be killed.
+Press `Shift + K` twice to terminate all processes matching these rules. PIDs `0`-`2`, kernel threads, processes owned by other users, well-known system/desktop/shell apps, and the current Idlekiller process are always protected and will not be killed. Bulk cleanup is refused while running as root (single kills still work).
 
