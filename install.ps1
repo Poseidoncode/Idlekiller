@@ -3,6 +3,9 @@ $ErrorActionPreference = "Stop"
 
 $repo = "Poseidoncode/Idlekiller"
 $ref = if ($env:IDLEKILLER_REF) { $env:IDLEKILLER_REF } else { "main" }
+if ($ref -notmatch '^[A-Za-z0-9._/-]{1,128}$' -or $ref -like '*..*') {
+    throw "Invalid IDLEKILLER_REF: '$ref' (allowed: letters, digits, . _ - /)"
+}
 $zipUrl = "https://github.com/$repo/archive/refs/heads/$ref.zip"
 $tmp = Join-Path $env:TEMP ("Idlekiller-" + [System.Guid]::NewGuid())
 $sourceDir = Join-Path $tmp "Idlekiller-$ref"
@@ -30,6 +33,10 @@ try {
     }
 
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
+
+    if (-not (Test-Path $sourceDir)) {
+        throw "Unexpected archive layout (ref '$ref' did not produce Idlekiller-$ref)"
+    }
 
     Push-Location $sourceDir
     try {
