@@ -30,6 +30,7 @@ pub struct ProcessInfo {
     pub cpu: f32,
     pub mem_mb: f64,
     pub status: String,
+    pub start_time: u64,
 }
 
 #[derive(Debug)]
@@ -60,8 +61,11 @@ pub struct App {
     pub confirming_kill_all: bool,
     pub wasteful_targets: Vec<Pid>,
     last_kill_instant: Option<Instant>,
+    last_search_instant: Option<Instant>,
     child_processes: Vec<std::process::Child>,
     current_effective_uid: Option<Uid>,
+    own_pid: Option<Pid>,
+    refresh_tick: u64,
 }
 
 impl Default for App {
@@ -74,8 +78,8 @@ impl App {
     pub fn new() -> Self {
         let sys = sysinfo::System::new_all();
 
-        let current_effective_uid = sysinfo::get_current_pid()
-            .ok()
+        let own_pid = sysinfo::get_current_pid().ok();
+        let current_effective_uid = own_pid
             .and_then(|pid| sys.process(pid))
             .and_then(|p| p.effective_user_id().cloned());
 
@@ -112,8 +116,11 @@ impl App {
             confirming_kill_all: false,
             wasteful_targets: Vec::new(),
             last_kill_instant: None,
+            last_search_instant: None,
             child_processes: Vec::new(),
             current_effective_uid,
+            own_pid,
+            refresh_tick: 0,
             is_searching: false,
             search_query: String::new(),
         };
@@ -149,6 +156,7 @@ impl App {
                     name_lower: process.name().to_string_lossy().to_lowercase(),
                     cpu: process.cpu_usage(),
                     mem_mb: process.memory() as f64 / 1024.0 / 1024.0,
+                    start_time: process.start_time(),
                     status: match process.status() {
                         ProcessStatus::Run => "Running",
                         ProcessStatus::Sleep => "Sleeping",
@@ -217,6 +225,7 @@ impl App {
 
     pub fn refresh(&mut self) {
         self.reap_children();
+        self.refresh_tick = self.refresh_tick.saturating_add(1);
         // Keep messages visible for at least 4 seconds
         let expired = self
             .message_instant
@@ -230,18 +239,26 @@ impl App {
         self.apply_filter();
     }
 
+    /// CPU readings need at least two spaced samples before they are
+    /// meaningful — until then every process reports ~0% and would be
+    /// misclassified as idle. Callers must not flag "wasteful" while unsettled.
+    pub fn cpu_settled(&self) -> bool {
+        self.refresh_tick >= 2
+    }
+
     fn reap_children(&mut self) {
         let mut i = 0;
         while i < self.child_processes.len() {
             match self.child_processes[i].try_wait() {
                 Ok(None) => i += 1,
                 Ok(Some(_)) => {
+                    // Already exited, so wait() reaps immediately without blocking.
                     let _ = self.child_processes.remove(i).wait();
                 }
                 Err(_) => {
-                    // If we cannot determine the state, reap the handle to avoid
-                    // zombies without blocking the UI.
-                    let _ = self.child_processes.remove(i).wait();
+                    // State unknown; wait() might block the UI thread, so keep
+                    // the handle and retry on the next tick.
+                    i += 1;
                 }
             }
         }
@@ -327,14 +344,47 @@ impl App {
             .table_state
             .selected()
             .and_then(|i| self.processes.get(i))
-            .map(|p| (p.name.clone(), p.pid));
+            .map(|p| (p.name.clone(), p.pid, p.start_time));
 
-        let Some((name, pid)) = selected_info else {
+        let Some((name, pid, snapshot_start)) = selected_info else {
             self.refresh();
             self.message = Some("No process selected".to_string());
             self.message_instant = Some(Instant::now());
             return;
         };
+
+        // Fail closed: without a known own-PID, self-protection cannot work.
+        let own_pid = self.own_pid.or_else(|| sysinfo::get_current_pid().ok());
+        if own_pid.is_none() {
+            self.message =
+                Some("Cannot determine own PID — killing disabled for safety".to_string());
+            self.message_instant = Some(Instant::now());
+            return;
+        }
+
+        // Resolve the live process before trusting anything from the table
+        // snapshot, which may be up to a tick old while PIDs get recycled.
+        let Some(process) = self.sys.process(pid) else {
+            self.refresh();
+            self.message = Some(format!(
+                "Process {} ({}) no longer exists",
+                name,
+                pid.as_u32()
+            ));
+            self.message_instant = Some(Instant::now());
+            return;
+        };
+        let live_name = process.name().to_string_lossy().to_string();
+        if live_name != name || process.start_time() != snapshot_start {
+            self.refresh();
+            self.message = Some(format!(
+                "Process {} ({}) changed since listing — refreshed, please retry",
+                name,
+                pid.as_u32()
+            ));
+            self.message_instant = Some(Instant::now());
+            return;
+        }
 
         // Protect critical system PIDs and self
         if is_protected_pid(pid) {
@@ -342,7 +392,7 @@ impl App {
             self.message_instant = Some(Instant::now());
             return;
         }
-        if Some(pid) == sysinfo::get_current_pid().ok() {
+        if Some(pid) == own_pid {
             self.message = Some("Refusing to kill self".to_string());
             self.message_instant = Some(Instant::now());
             return;
@@ -358,42 +408,32 @@ impl App {
             return;
         }
 
-        if let Some(process) = self.sys.process(pid) {
-            if is_kernel_thread(process)
-                || !is_owned_by_current_user(self.current_effective_uid.as_ref(), process)
-            {
-                self.message = Some(format!(
-                    "Refusing to kill {} ({}): not owned or protected",
-                    name, pid
-                ));
-                self.message_instant = Some(Instant::now());
-                return;
-            }
-            let killed = process.kill();
-            if killed {
-                self.refresh();
-                self.message = Some(format!("Killed process {} ({})", name, pid));
-                self.message_instant = Some(Instant::now());
-            } else {
-                self.refresh();
-                let gone = self.sys.process(pid).is_none();
-                self.message = Some(if gone {
-                    format!("Process {} ({}) already ended", name, pid)
-                } else {
-                    format!(
-                        "Failed to kill process {} ({}). Try running with sudo?",
-                        name, pid
-                    )
-                });
-                self.message_instant = Some(Instant::now());
-            }
+        if is_kernel_thread(process)
+            || !is_owned_by_current_user(self.current_effective_uid.as_ref(), process)
+        {
+            self.message = Some(format!(
+                "Refusing to kill {} ({}): not owned or protected",
+                name, pid
+            ));
+            self.message_instant = Some(Instant::now());
+            return;
+        }
+        let killed = process.kill();
+        if killed {
+            self.refresh();
+            self.message = Some(format!("Killed process {} ({})", name, pid));
+            self.message_instant = Some(Instant::now());
         } else {
             self.refresh();
-            self.message = Some(format!(
-                "Process {} ({}) no longer exists",
-                name,
-                pid.as_u32()
-            ));
+            let gone = self.sys.process(pid).is_none();
+            self.message = Some(if gone {
+                format!("Process {} ({}) already ended", name, pid)
+            } else {
+                format!(
+                    "Failed to kill process {} ({}): permission denied (owned by another user?)",
+                    name, pid
+                )
+            });
             self.message_instant = Some(Instant::now());
         }
     }
@@ -449,6 +489,14 @@ impl App {
     }
 
     pub fn open_search(&mut self) {
+        const SEARCH_DEBOUNCE_MS: u64 = 500;
+        if let Some(last) = self.last_search_instant {
+            if last.elapsed() < Duration::from_millis(SEARCH_DEBOUNCE_MS) {
+                return;
+            }
+        }
+        self.last_search_instant = Some(Instant::now());
+
         let Some(target) = self
             .table_state
             .selected()
@@ -494,6 +542,11 @@ impl App {
     }
 
     pub fn kill_all_wasteful(&mut self) {
+        if !self.cpu_settled() {
+            self.message = Some("Still gathering CPU data — try again in a moment".to_string());
+            self.message_instant = Some(Instant::now());
+            return;
+        }
         if !self.confirming_kill_all {
             self.wasteful_targets = self.find_wasteful_targets();
             self.confirming_kill_all = true;
@@ -529,15 +582,41 @@ impl App {
         }
         self.confirming_kill_all = false;
 
+        // Bulk kill as the superuser could take down system daemons, so it
+        // is refused outright — single kills remain available explicitly.
+        if self
+            .current_effective_uid
+            .as_ref()
+            .is_some_and(is_superuser)
+        {
+            self.message = Some(
+                "Refusing bulk kill while running as root (blast radius too large)".to_string(),
+            );
+            self.message_instant = Some(Instant::now());
+            return;
+        }
+
         // Recompute targets at confirmation time to avoid stale PIDs / reuse.
         let targets = self.find_wasteful_targets();
         self.wasteful_targets.clear();
         let found_count = targets.len();
         let mut killed_count = 0;
         for pid in targets {
-            if let Some(process) = self.sys.process(pid)
-                && process.kill()
+            let Some(process) = self.sys.process(pid) else {
+                continue;
+            };
+            // Revalidate every predicate: the snapshot may be stale and the
+            // PID may have been recycled since the target list was built.
+            if Some(pid) == self.own_pid
+                || is_protected_pid(pid)
+                || is_kernel_thread(process)
+                || !is_owned_by_current_user(self.current_effective_uid.as_ref(), process)
+                || is_protected_name(&process.name().to_string_lossy())
+                || !is_wasteful(process)
             {
+                continue;
+            }
+            if process.kill() {
                 killed_count += 1;
             }
         }
@@ -567,10 +646,11 @@ impl App {
 
     /// Identify idle but memory-heavy processes, excluding protected PIDs and known safe apps.
     fn find_wasteful_targets(&self) -> Vec<Pid> {
-        let own_pid = sysinfo::get_current_pid().ok();
+        let own_pid = self.own_pid.or_else(|| sysinfo::get_current_pid().ok());
         let mut targets = Vec::new();
         for (pid, process) in self.sys.processes() {
-            if Some(*pid) == own_pid
+            if own_pid.is_none()
+                || Some(*pid) == own_pid
                 || is_protected_pid(*pid)
                 || is_kernel_thread(process)
                 || !is_owned_by_current_user(self.current_effective_uid.as_ref(), process)
@@ -581,17 +661,7 @@ impl App {
             if is_protected_name(&name) {
                 continue;
             }
-            let cpu = process.cpu_usage();
-            let status = process.status();
-            let mem_mb = process.memory() as f64 / 1024.0 / 1024.0;
-
-            // Parked is macOS halted-at-clean-point, treated as idle
-            let is_idle = cpu < IDLE_CPU_THRESHOLD
-                && matches!(
-                    status,
-                    ProcessStatus::Sleep | ProcessStatus::Idle | ProcessStatus::Parked
-                );
-            if is_idle && mem_mb > WASTEFUL_MEM_MB {
+            if is_wasteful(process) {
                 targets.push(*pid);
             }
         }
@@ -618,6 +688,30 @@ fn is_owned_by_current_user(current: Option<&Uid>, process: &Process) -> bool {
         (None, None) => true,
         _ => false,
     }
+}
+
+/// True when the process is idle but memory-heavy (a cleanup candidate).
+/// Parked is the macOS halted-at-clean-point state, treated as idle.
+fn is_wasteful(process: &Process) -> bool {
+    let idle = process.cpu_usage() < IDLE_CPU_THRESHOLD
+        && matches!(
+            process.status(),
+            ProcessStatus::Sleep | ProcessStatus::Idle | ProcessStatus::Parked
+        );
+    idle && process.memory() as f64 / 1024.0 / 1024.0 > WASTEFUL_MEM_MB
+}
+
+/// True for the Unix superuser (uid 0). Windows has no equivalent concept
+/// for this check, so this is always false there.
+#[cfg(not(windows))]
+fn is_superuser(uid: &Uid) -> bool {
+    use std::ops::Deref;
+    *uid.deref() == 0
+}
+
+#[cfg(windows)]
+fn is_superuser(_uid: &Uid) -> bool {
+    false
 }
 
 // Known safe processes that should not be bulk-killed: terminals, shells, window/DE/dock, browsers, editors, messengers.
@@ -661,11 +755,39 @@ const PROTECTED_NAMES: &[&str] = &[
     "xfwm4",
     "i3",
     "sway",
-    "dwm",
     "explorer",
     "powershell",
     "pwsh",
     "cmd",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "nu",
+    "dash",
+    "elvish",
+    "xonsh",
+    "ion",
+    "ssh",
+    "sshd",
+    "scp",
+    "sftp",
+    "mosh",
+    "tmux",
+    "screen",
+    "docker",
+    "dockerd",
+    "containerd",
+    "podman",
+    "colima",
+    "lima",
+    "qemu",
+    "dbus",
+    "pipewire",
+    "wireplumber",
+    "pulseaudio",
+    "coreaudio",
+    "cron",
     "terminal",
     "windowsterminal",
     "iterm2",
@@ -735,13 +857,16 @@ fn url_encode_query(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_protected_name, is_protected_pid, url_encode_query};
+    use super::{
+        App, ProcessInfo, is_protected_name, is_protected_pid, is_superuser, url_encode_query,
+    };
     use sysinfo::Pid;
 
     #[test]
     fn protected_pids() {
         assert!(is_protected_pid(Pid::from(0usize)));
         assert!(is_protected_pid(Pid::from(1usize)));
+        assert!(is_protected_pid(Pid::from(2usize)));
         assert!(!is_protected_pid(Pid::from(1234usize)));
     }
 
@@ -753,6 +878,68 @@ mod tests {
         assert!(is_protected_name("terminal"));
         assert!(!is_protected_name("xterminal"));
         assert!(!is_protected_name("my_custom_app"));
+    }
+
+    #[test]
+    fn protected_names_cover_shells_and_daemons() {
+        for name in [
+            "zsh",
+            "bash",
+            "fish",
+            "sh",
+            "sshd",
+            "ssh",
+            "docker",
+            "containerd",
+            "dbus",
+            "pipewire",
+            "tmux",
+            "nu",
+        ] {
+            assert!(is_protected_name(name), "{name} should be protected");
+        }
+    }
+
+    #[test]
+    fn cpu_settles_only_after_two_refreshes() {
+        let mut app = App::new();
+        assert!(!app.cpu_settled());
+        app.refresh();
+        assert!(app.cpu_settled());
+    }
+
+    #[test]
+    fn superuser_detection_matches_platform() {
+        let root = sysinfo::Uid::try_from(0usize).expect("uid 0 converts");
+        #[cfg(not(windows))]
+        assert!(is_superuser(&root));
+        #[cfg(windows)]
+        assert!(!is_superuser(&root));
+    }
+
+    #[test]
+    fn kill_selected_rejects_recycled_pid() {
+        // Given: our own live process, as seen in the latest snapshot...
+        let mut app = App::new();
+        let own = app
+            .all_processes
+            .iter()
+            .find(|p| Some(p.pid) == app.own_pid)
+            .cloned()
+            .expect("own process should be listed");
+        // When: the selected row still shows that PID but with a stale
+        // identity (original exited, PID recycled by another process)...
+        app.processes = vec![ProcessInfo {
+            name: "definitely-not-the-live-name".to_string(),
+            name_lower: "definitely-not-the-live-name".to_string(),
+            start_time: own.start_time.wrapping_add(1),
+            ..own
+        }];
+        app.table_state.select(Some(0));
+        app.kill_selected();
+        // Then: the kill is refused instead of hitting the wrong process.
+        let msg = app.message.clone().unwrap_or_default();
+        assert!(msg.contains("changed since listing"), "got: {msg}");
     }
 
     #[test]
