@@ -40,7 +40,10 @@ try {
 
     Push-Location $sourceDir
     try {
-        & cargo build --release
+        & cargo build --release --locked
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cargo build failed with exit code $LASTEXITCODE"
+        }
     } finally {
         Pop-Location
     }

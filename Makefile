@@ -12,19 +12,19 @@ help:
 	@echo "  make clean  - Run cargo clean and remove local Idlekiller.app"
 
 run:
-	cargo run
+	cargo run --locked
 
 test:
-	cargo test
+	cargo test --locked
 
 check:
-	cargo check
+	cargo check --locked
 
 build:
-	cargo build
+	cargo build --locked
 
 app:
-	cargo build --release
+	cargo build --release --locked
 	@echo "Packaging macOS app..."
 	rm -rf Idlekiller.app
 	mkdir -p Idlekiller.app/Contents/MacOS

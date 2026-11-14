@@ -48,7 +48,7 @@ EOF
   cd "$TMP_DIR/Idlekiller-$REF"
 
   echo "Building..."
-  cargo build --release
+  cargo build --release --locked
 
   if [ -w /usr/local/bin ] 2>/dev/null; then
     INSTALL_DIR="/usr/local/bin"

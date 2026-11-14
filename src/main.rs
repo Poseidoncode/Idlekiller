@@ -32,10 +32,9 @@ impl Drop for TerminalGuard {
 
 fn main() -> Result<(), Box<dyn Error>> {
     // ponytail: named constant for tick rate
-    const TICK_RATE_MS: u64 = 1000;
+    const TICK_RATE_MS: u64 = 100;
 
-    // Create app before terminal setup so the 100ms CPU-delta sleep
-    // doesn't block the terminal (avoids unresponsive startup).
+    // Start the nonblocking collector before entering alternate-screen mode.
     let mut app = App::new();
     let tick_rate = Duration::from_millis(TICK_RATE_MS);
 
@@ -47,11 +46,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Check minimum terminal size
+    // Keep enough room for a table row, not just borders and header.
     let size = terminal.size()?;
-    if size.width < 50 || size.height < 12 {
+    if size.width < 50 || size.height < 16 {
         return Err(format!(
-            "Terminal too small: {}x{} (need at least 50x12)",
+            "Terminal too small: {}x{} (need at least 50x16)",
             size.width, size.height
         )
         .into());
@@ -86,6 +85,9 @@ fn run_app<B: ratatui::backend::Backend>(
             draw_failures = 0; // reset on any successful draw
         } else {
             draw_failures = draw_failures.saturating_add(1);
+            if draw_failures >= 7 {
+                return Err("Terminal rendering failed repeatedly; exiting to restore terminal".into());
+            }
             // Keep dirty=true so next iteration retries
         }
         // Exponential backoff: 50ms × 2^(failures-1), max ~3.2s
@@ -105,7 +107,12 @@ fn run_app<B: ratatui::backend::Backend>(
         if crossterm::event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if key.kind != KeyEventKind::Press {
+                    // Navigation repeats are useful; destructive keys must never auto-repeat.
+                    if key.kind == KeyEventKind::Release
+                        || (key.kind == KeyEventKind::Repeat
+                            && !matches!(key.code, KeyCode::Up | KeyCode::Down
+                                | KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Backspace))
+                    {
                         continue;
                     }
                     let plain = !key.modifiers.intersects(
@@ -114,20 +121,21 @@ fn run_app<B: ratatui::backend::Backend>(
                             | KeyModifiers::SUPER
                             | KeyModifiers::HYPER,
                     );
+                    if app.dismiss_action_report() {
+                        // Result modal consumes the input. It must not double as
+                        // an action/quit key after dismissing the dialog.
+                        continue;
+                    }
                     if app.is_searching {
+                        app.cancel_pending_kills();
                         match key.code {
-                            KeyCode::Enter if plain => {
-                                app.is_searching = false;
-                                app.dirty = true;
-                            }
-                            KeyCode::Esc if plain => {
-                                app.is_searching = false;
-                                app.search_query.clear();
-                                app.apply_filter();
-                            }
+                            KeyCode::Enter if plain => app.finish_search(true),
+                            KeyCode::Esc if plain => app.finish_search(false),
                             KeyCode::Char(c) if plain => {
-                                app.search_query.push(c);
-                                app.apply_filter();
+                                if app.search_query.chars().count() < 128 {
+                                    app.search_query.push(c);
+                                    app.apply_filter();
+                                }
                             }
                             KeyCode::Backspace if plain => {
                                 app.search_query.pop();
@@ -136,15 +144,20 @@ fn run_app<B: ratatui::backend::Backend>(
                             _ => {}
                         }
                     } else {
+                        let was_confirming = app.has_pending_kills();
+                        if !plain || !matches!(key.code, KeyCode::Enter | KeyCode::Char('x') | KeyCode::Char('K')) {
+                            app.cancel_pending_kills();
+                        }
                         match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc if plain => app.should_quit = true,
+                            KeyCode::Char('q') if plain => app.should_quit = true,
+                            KeyCode::Esc if plain && !was_confirming => app.should_quit = true,
+                            KeyCode::Esc if plain => {},
                             KeyCode::Down | KeyCode::Char('j') if plain => app.next(),
                             KeyCode::Up | KeyCode::Char('k') if plain => app.previous(),
                             KeyCode::Enter | KeyCode::Char('x') if plain => app.kill_selected(),
                             KeyCode::Char('s') if plain => app.open_search(),
                             KeyCode::Char('f') | KeyCode::Char('/') if plain => {
-                                app.is_searching = true;
-                                app.dirty = true;
+                                app.begin_search();
                             }
                             KeyCode::Char('K') if plain => {
                                 app.kill_all_wasteful();
@@ -158,38 +171,50 @@ fn run_app<B: ratatui::backend::Backend>(
                             KeyCode::Char('r') if plain => {
                                 app.toggle_sort_direction();
                             }
-                            _ => {
-                                // any other key cancels confirmation
-                                app.confirming_kill_all = false;
-                                app.wasteful_targets.clear();
-                            }
+                            _ => {}
                         }
                     }
                 }
                 Event::Resize(w, h) => {
+                    app.cancel_pending_kills();
                     app.dirty = true;
-                    if w < 50 || h < 12 {
-                        app.message = Some(format!("Terminal too small: {}x{} (need 50x12)", w, h));
+                    if w < 50 || h < 16 {
+                        app.message = Some(format!("Terminal too small: {}x{} (need 50x16)", w, h));
                         app.message_instant = Some(Instant::now());
                     }
                 }
-                Event::Mouse(mouse) => match mouse.kind {
-                    event::MouseEventKind::ScrollDown => {
-                        app.next();
-                        app.next();
-                        app.next();
-                    }
-                    event::MouseEventKind::ScrollUp => {
-                        app.previous();
-                        app.previous();
-                        app.previous();
-                    }
-                    event::MouseEventKind::Down(event::MouseButton::Left) if !app.is_searching => {
-                        if let Ok(size) = terminal.size() {
-                            ui::handle_header_click(app, mouse.column, mouse.row, size.width);
+                Event::Mouse(mouse) => {
+                    // Modal dialogs are exclusive. Clicking a modal must not
+                    // select or sort the obscured process table underneath it.
+                    if app.has_action_report() {
+                        if matches!(mouse.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+                            app.dismiss_action_report();
+                        }
+                    } else if app.has_pending_kills() {
+                        if matches!(mouse.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+                            app.cancel_pending_kills();
+                        }
+                    } else {
+                        match mouse.kind {
+                            event::MouseEventKind::ScrollDown => {
+                                app.next();
+                                app.next();
+                                app.next();
+                            }
+                            event::MouseEventKind::ScrollUp => {
+                                app.previous();
+                                app.previous();
+                                app.previous();
+                            }
+                            event::MouseEventKind::Down(event::MouseButton::Left) if !app.is_searching => {
+                                if let Ok(size) = terminal.size() {
+                                    ui::handle_header_click(app, mouse.column, mouse.row, size.width);
+                                    ui::handle_process_click(app, mouse.row, size.height);
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
                 },
                 _ => {}
             }

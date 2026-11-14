@@ -1,54 +1,30 @@
+//! Non-destructive example: verify that the background collector has delivered
+//! a snapshot. No real process is ever signalled by this example.
 use idlekiller::app::App;
+use std::time::{Duration, Instant};
 
 fn main() {
     let mut app = App::new();
-    app.refresh();
-
-    let own_pid = sysinfo::get_current_pid()
-        .expect("should get current pid")
-        .as_u32();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while app.total_process_count() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        app.refresh();
+    }
+    assert!(app.total_process_count() > 0, "collector did not produce processes");
+    let own_pid = sysinfo::get_current_pid().expect("must have PID");
     assert!(
-        app.processes.iter().any(|p| p.pid.as_u32() == own_pid),
+        (0..app.processes.len()).filter_map(|i| app.process_info(i))
+            .any(|p| p.pid == own_pid),
         "own process should appear in the process list"
     );
-
-    // apply_filter should keep a non-empty list when no search query
-    let baseline_len = app.processes.len();
-    assert!(
-        !app.processes.is_empty(),
-        "filtered process list should not be empty"
-    );
-
-    // cycling sort and toggling direction should not panic
+    let count = app.processes.len();
     app.cycle_sort_column();
     app.toggle_sort_direction();
-
-    // searching with a non-matching pattern should yield an empty list
-    app.search_query = "this_should_not_match_any_real_process".to_string();
+    app.search_query = "this_should_not_match_any_real_process".into();
     app.apply_filter();
-    assert!(
-        app.processes.is_empty(),
-        "non-matching search should yield empty list"
-    );
-
-    // clearing the search should restore the original list
+    assert!(app.processes.is_empty());
     app.search_query.clear();
     app.apply_filter();
-    assert_eq!(
-        app.processes.len(),
-        baseline_len,
-        "clearing search should restore the full list"
-    );
-
-    // first press of 'kill all wasteful' should not include our own pid
-    app.kill_all_wasteful();
-    assert!(
-        !app.wasteful_targets.iter().any(|p| p.as_u32() == own_pid),
-        "own process should not be considered wasteful"
-    );
-
-    println!(
-        "IdleKiller logic verification passed ({} processes seen)",
-        baseline_len
-    );
+    assert_eq!(app.processes.len(), count);
+    println!("Non-destructive verification passed ({count} processes)");
 }
