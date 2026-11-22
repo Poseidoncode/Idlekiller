@@ -68,12 +68,40 @@ fn register_shutdown_signals() -> Arc<AtomicBool> {
     flag
 }
 
+/// When the controlling terminal disappears (window closed, ssh dropped), crossterm's
+/// `event::poll` keeps re-reading EOF inside its own loop and never returns, so the
+/// event loop can neither see the shutdown flag nor exit: the process spins at 100% CPU.
+/// This watchdog runs independently of that loop and ends the process in that case.
+fn spawn_hangup_watchdog(shutdown: Arc<AtomicBool>) {
+    let _ = std::thread::Builder::new()
+        .name("hangup-watchdog".into())
+        .spawn(move || {
+            let mut signalled_at: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                if shutdown.load(Ordering::Relaxed) {
+                    // Give the event loop a moment to exit cleanly; if it is stuck
+                    // inside poll() on a dead tty it never will.
+                    let since = *signalled_at.get_or_insert_with(Instant::now);
+                    if since.elapsed() < Duration::from_millis(750) {
+                        continue;
+                    }
+                } else if crossterm::terminal::size().is_ok() {
+                    continue;
+                }
+                restore_terminal();
+                std::process::exit(0);
+            }
+        });
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     // ponytail: named constant for tick rate
     const TICK_RATE_MS: u64 = 100;
 
     install_panic_hook();
     let shutdown = register_shutdown_signals();
+    spawn_hangup_watchdog(Arc::clone(&shutdown));
 
     // Start the nonblocking collector before entering alternate-screen mode.
     let mut app = App::new();
