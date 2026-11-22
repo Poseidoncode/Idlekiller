@@ -9,7 +9,10 @@ if [[ ! "$REF" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || [[ "$REF" == *".."* ]]; then
   echo "Invalid IDLEKILLER_REF: '$REF' (allowed: letters, digits, . _ - /)" >&2
   exit 1
 fi
-URL="https://github.com/$REPO/archive/refs/heads/$REF.tar.gz"
+# /archive/<ref> resolves branches, tags and commit SHAs alike.
+# For a reproducible install, pin a tag or commit and set IDLEKILLER_SHA256
+# (a checksum of a moving branch such as "main" goes stale on every push).
+URL="https://github.com/$REPO/archive/$REF.tar.gz"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -40,12 +43,17 @@ EOF
     fi
   fi
 
-  tar -xzf "$archive" -C "$TMP_DIR"
-  if [ ! -d "$TMP_DIR/Idlekiller-$REF" ]; then
-    echo "Unexpected archive layout (ref '$REF' did not produce Idlekiller-$REF)" >&2
+  local extract="$TMP_DIR/src"
+  mkdir -p "$extract"
+  tar -xzf "$archive" -C "$extract"
+  # The top-level directory name depends on the ref (slashes become dashes,
+  # a leading "v" is dropped for tags), so locate it instead of guessing.
+  local dirs=("$extract"/*/)
+  if [ "${#dirs[@]}" -ne 1 ] || [ ! -f "${dirs[0]}Cargo.toml" ]; then
+    echo "Unexpected archive layout for ref '$REF'" >&2
     exit 1
   fi
-  cd "$TMP_DIR/Idlekiller-$REF"
+  cd "${dirs[0]}"
 
   echo "Building..."
   cargo build --release --locked
@@ -62,17 +70,20 @@ EOF
   echo "Installed to $INSTALL_DIR/idlekiller"
 
   if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-    case "${SHELL:-}" in
-      */zsh) rc="${HOME}/.zshrc" ;;
-      */bash) rc="${HOME}/.bashrc" ;;
-      *) rc="" ;;
-    esac
-    if [ -n "$rc" ] && ! grep -qxF "export PATH=\"$INSTALL_DIR:\$PATH\"" "$rc" 2>/dev/null; then
-      echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$rc"
-      echo "Added $INSTALL_DIR to PATH in $rc"
+    echo "$INSTALL_DIR is not on your PATH. Add this line to your shell profile:"
+    echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    if [ "${IDLEKILLER_MODIFY_PATH:-0}" = "1" ]; then
+      case "${SHELL:-}" in
+        */zsh) rc="${HOME}/.zshrc" ;;
+        */bash) rc="${HOME}/.bashrc" ;;
+        *) rc="" ;;
+      esac
+      if [ -n "$rc" ] && ! grep -qxF "export PATH=\"$INSTALL_DIR:\$PATH\"" "$rc" 2>/dev/null; then
+        echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$rc"
+        echo "Added $INSTALL_DIR to PATH in $rc"
+      fi
     else
-      echo "Add $INSTALL_DIR to your PATH if 'idlekiller' is not found:"
-      echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+      echo "(set IDLEKILLER_MODIFY_PATH=1 to let this installer edit your shell profile)"
     fi
   fi
 }

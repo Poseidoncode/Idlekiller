@@ -10,29 +10,70 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     error::Error,
     io,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use idlekiller::app::App;
 use idlekiller::ui;
 
-/// Guard that restores terminal state on panic or early return.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        Show
+    );
+}
+
+/// Guard that restores terminal state on early return and during unwinding.
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            Show
-        );
+        restore_terminal();
     }
+}
+
+/// Leave the alternate screen *before* the panic message prints; otherwise the
+/// message is written to the alternate screen and vanishes when the guard runs.
+/// Only the main thread owns the terminal, so a worker-thread panic must not
+/// tear the UI down (the app reports that case as "worker stopped").
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some("main") {
+            restore_terminal();
+        }
+        default_hook(info);
+    }));
+}
+
+/// SIGTERM/SIGHUP/SIGINT only set a flag; the event loop then exits normally so
+/// the guard restores the terminal instead of leaving it in raw mode.
+fn register_shutdown_signals() -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    for signal in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+        signal_hook::consts::SIGINT,
+    ] {
+        // Failure only means the default (terminal not restored) behavior remains.
+        let _ = signal_hook::flag::register(signal, Arc::clone(&flag));
+    }
+    flag
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     // ponytail: named constant for tick rate
     const TICK_RATE_MS: u64 = 100;
+
+    install_panic_hook();
+    let shutdown = register_shutdown_signals();
 
     // Start the nonblocking collector before entering alternate-screen mode.
     let mut app = App::new();
@@ -57,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // run app
-    let res = run_app(&mut terminal, &mut app, tick_rate);
+    let res = run_app(&mut terminal, &mut app, tick_rate, &shutdown);
 
     // Restore terminal on the normal exit path; the guard handles panics.
     drop(_guard);
@@ -69,6 +110,7 @@ fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     tick_rate: Duration,
+    shutdown: &AtomicBool,
 ) -> Result<(), Box<dyn Error>> {
     let mut last_tick = Instant::now();
     // ponytail: exponential backoff on draw failure to avoid busy-spin
@@ -86,7 +128,9 @@ fn run_app<B: ratatui::backend::Backend>(
         } else {
             draw_failures = draw_failures.saturating_add(1);
             if draw_failures >= 7 {
-                return Err("Terminal rendering failed repeatedly; exiting to restore terminal".into());
+                return Err(
+                    "Terminal rendering failed repeatedly; exiting to restore terminal".into(),
+                );
             }
             // Keep dirty=true so next iteration retries
         }
@@ -110,10 +154,23 @@ fn run_app<B: ratatui::backend::Backend>(
                     // Navigation repeats are useful; destructive keys must never auto-repeat.
                     if key.kind == KeyEventKind::Release
                         || (key.kind == KeyEventKind::Repeat
-                            && !matches!(key.code, KeyCode::Up | KeyCode::Down
-                                | KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Backspace))
+                            && !matches!(
+                                key.code,
+                                KeyCode::Up
+                                    | KeyCode::Down
+                                    | KeyCode::Char('j')
+                                    | KeyCode::Char('k')
+                                    | KeyCode::Backspace
+                            ))
                     {
                         continue;
+                    }
+                    // Raw mode turns Ctrl+C into an ordinary key event; honor it
+                    // everywhere (also while filtering or inside a dialog).
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+                    {
+                        return Ok(());
                     }
                     let plain = !key.modifiers.intersects(
                         KeyModifiers::CONTROL
@@ -145,13 +202,17 @@ fn run_app<B: ratatui::backend::Backend>(
                         }
                     } else {
                         let was_confirming = app.has_pending_kills();
-                        if !plain || !matches!(key.code, KeyCode::Enter | KeyCode::Char('x') | KeyCode::Char('K')) {
+                        // Only `y` may keep a confirmation alive; the arming keys
+                        // (Enter/x/K) re-arm instead of confirming, so holding or
+                        // double-tapping them can never terminate anything.
+                        if !plain || key.code != KeyCode::Char('y') {
                             app.cancel_pending_kills();
                         }
                         match key.code {
+                            KeyCode::Char('y') if plain => app.confirm_pending(),
                             KeyCode::Char('q') if plain => app.should_quit = true,
                             KeyCode::Esc if plain && !was_confirming => app.should_quit = true,
-                            KeyCode::Esc if plain => {},
+                            KeyCode::Esc if plain => {}
                             KeyCode::Down | KeyCode::Char('j') if plain => app.next(),
                             KeyCode::Up | KeyCode::Char('k') if plain => app.previous(),
                             KeyCode::Enter | KeyCode::Char('x') if plain => app.kill_selected(),
@@ -187,11 +248,17 @@ fn run_app<B: ratatui::backend::Backend>(
                     // Modal dialogs are exclusive. Clicking a modal must not
                     // select or sort the obscured process table underneath it.
                     if app.has_action_report() {
-                        if matches!(mouse.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+                        if matches!(
+                            mouse.kind,
+                            event::MouseEventKind::Down(event::MouseButton::Left)
+                        ) {
                             app.dismiss_action_report();
                         }
                     } else if app.has_pending_kills() {
-                        if matches!(mouse.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+                        if matches!(
+                            mouse.kind,
+                            event::MouseEventKind::Down(event::MouseButton::Left)
+                        ) {
                             app.cancel_pending_kills();
                         }
                     } else {
@@ -206,16 +273,23 @@ fn run_app<B: ratatui::backend::Backend>(
                                 app.previous();
                                 app.previous();
                             }
-                            event::MouseEventKind::Down(event::MouseButton::Left) if !app.is_searching => {
+                            event::MouseEventKind::Down(event::MouseButton::Left)
+                                if !app.is_searching =>
+                            {
                                 if let Ok(size) = terminal.size() {
-                                    ui::handle_header_click(app, mouse.column, mouse.row, size.width);
+                                    ui::handle_header_click(
+                                        app,
+                                        mouse.column,
+                                        mouse.row,
+                                        size.width,
+                                    );
                                     ui::handle_process_click(app, mouse.row, size.height);
                                 }
                             }
                             _ => {}
                         }
                     }
-                },
+                }
                 _ => {}
             }
         }
@@ -225,6 +299,9 @@ fn run_app<B: ratatui::backend::Backend>(
             last_tick = Instant::now();
         }
 
+        if shutdown.load(Ordering::Relaxed) {
+            app.should_quit = true;
+        }
         if app.should_quit {
             return Ok(());
         }

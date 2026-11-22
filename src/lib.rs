@@ -1,3 +1,3 @@
 pub mod app;
-pub mod ui;
 mod collector;
+pub mod ui;

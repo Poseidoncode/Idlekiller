@@ -2,7 +2,10 @@
 //! Usage: cargo run --release --example profile_collector -- 3600 > profile.csv
 //! Only reads process metadata; never submits a termination command.
 use idlekiller::app::App;
-use std::{env, thread, time::{Duration, Instant}};
+use std::{
+    env, thread,
+    time::{Duration, Instant},
+};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 fn main() {
@@ -24,7 +27,8 @@ fn main() {
             ProcessRefreshKind::nothing().with_memory().without_tasks(),
         );
         let rss = meter.process(my_pid).map_or(0, |process| process.memory());
-        println!("{},{},{},{}",
+        println!(
+            "{},{},{},{}",
             started.elapsed().as_secs(),
             app.total_process_count(),
             app.system_stats.scan_duration_ms,

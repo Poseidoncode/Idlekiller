@@ -6,9 +6,11 @@ $ref = if ($env:IDLEKILLER_REF) { $env:IDLEKILLER_REF } else { "main" }
 if ($ref -notmatch '^[A-Za-z0-9._/-]{1,128}$' -or $ref -like '*..*') {
     throw "Invalid IDLEKILLER_REF: '$ref' (allowed: letters, digits, . _ - /)"
 }
-$zipUrl = "https://github.com/$repo/archive/refs/heads/$ref.zip"
+# /archive/<ref> resolves branches, tags and commit SHAs alike.
+# For a reproducible install pin a tag or commit and set IDLEKILLER_SHA256.
+$zipUrl = "https://github.com/$repo/archive/$ref.zip"
 $tmp = Join-Path $env:TEMP ("Idlekiller-" + [System.Guid]::NewGuid())
-$sourceDir = Join-Path $tmp "Idlekiller-$ref"
+$extractDir = Join-Path $tmp "src"
 
 function Test-Command($cmd) {
     $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue)
@@ -32,11 +34,14 @@ try {
         }
     }
 
-    Expand-Archive -Path $zip -DestinationPath $tmp -Force
+    Expand-Archive -Path $zip -DestinationPath $extractDir -Force
 
-    if (-not (Test-Path $sourceDir)) {
-        throw "Unexpected archive layout (ref '$ref' did not produce Idlekiller-$ref)"
+    # The top-level folder name depends on the ref, so locate it.
+    $dirs = @(Get-ChildItem -Path $extractDir -Directory)
+    if ($dirs.Count -ne 1 -or -not (Test-Path (Join-Path $dirs[0].FullName "Cargo.toml"))) {
+        throw "Unexpected archive layout for ref '$ref'"
     }
+    $sourceDir = $dirs[0].FullName
 
     Push-Location $sourceDir
     try {
@@ -54,9 +59,11 @@ try {
 
     $resolvedDir = (Resolve-Path $installDir).Path.TrimEnd('\')
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $normalizedPath = ($currentPath -replace '\\+$', '').TrimEnd('\')
-    if ($normalizedPath -notlike "*$resolvedDir*") {
-        [Environment]::SetEnvironmentVariable("Path", "$currentPath;$installDir", "User")
+    $entries = @(($currentPath -split ';') | Where-Object { $_ } |
+        ForEach-Object { $_.TrimEnd('\') })
+    if ($entries -notcontains $resolvedDir) {
+        $newPath = if ($currentPath) { ($currentPath.TrimEnd(';')) + ";$resolvedDir" } else { $resolvedDir }
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         Write-Host "Added $installDir to your user PATH. Restart your terminal to use 'idlekiller'."
     }
 

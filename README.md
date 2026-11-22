@@ -9,7 +9,7 @@ A Rust-based TUI process manager for identifying and cleaning up resource-heavy 
 - Live process table with CPU, memory and status
 - Sort by any column (`Tab` / `Shift + Tab`, `r` to reverse)
 - Filter by name in-app (`f` or `/`); `Esc` restores the previous filter
-- Confirmed cleanup of repeatedly idle and memory-heavy process candidates (`Shift + K` twice)
+- Confirmed cleanup of repeatedly idle and memory-heavy process candidates (`Shift + K`, then `y`)
 - Search the selected process in your browser (`s`)
 - Mouse support: scroll, click headers to sort
 - Background monitoring with bounded latest-only snapshots and responsive UI
@@ -36,6 +36,8 @@ cargo install --path . --locked
 
 **Note:** The one-line installers below download the GitHub `main` branch, which may not contain the changes in this reviewed ZIP. Read scripts before running them.
 
+Set `IDLEKILLER_REF` to a tag or commit to pin a version, and `IDLEKILLER_SHA256` to verify the archive (only meaningful for a pinned tag/commit, since `main` changes). `install.sh` no longer edits your shell profile unless `IDLEKILLER_MODIFY_PATH=1` is set.
+
 ### Upstream one-line install (macOS / Linux)
 
 ```bash
@@ -61,12 +63,13 @@ idlekiller
 | Key | Action |
 | --- | --- |
 | `↑` / `↓` / `k` / `j` | Move selection up / down |
-| `Enter` / `x` | Preview and confirm termination of the selected process (press twice within 8s) |
+| `Enter` / `x` | Preview termination of the selected process, then press `y` within 8s to confirm |
 | `f` / `/` | Edit name filter; Enter commits, Esc restores the previous filter |
-| `Shift + K` | Review cleanup candidates (press twice within 8s to confirm) |
+| `Shift + K` | Review cleanup candidates, then press `y` within 8s to confirm |
 | `s` | Search the selected process on Google |
 | `Tab` / `Shift + Tab` | Cycle sort column forward / backward |
 | `r` | Reverse the current sort direction |
+| `Ctrl + C` | Quit immediately |
 | `q` / `Esc` | Quit; Esc closes an open confirmation/result dialog first |
 
 Mouse:
@@ -89,7 +92,7 @@ Press `Shift + K` twice to request termination of visible-filter candidates, up 
 
 ### Safety and limitations
 
-**Sleeping and high memory usage do not prove a process is expendable.** The 500 MB / 0.1% thresholds identify *candidates* only, not memory leaks. Always inspect the preview and avoid bulk cleanup when important work is running. On Unix, the program requests graceful termination with SIGTERM; on Windows, termination remains forceful. Unsaved work may still be lost. Individual and bulk termination require a second confirmation within eight seconds and recheck process identity and ownership before acting. The program does not guarantee protection against every possible PID race. If ownership cannot be established, termination is refused.
+**Sleeping and high memory usage do not prove a process is expendable.** The 500 MB / 0.1% thresholds identify *candidates* only, not memory leaks. Always inspect the preview and avoid bulk cleanup when important work is running. On Unix, the program requests graceful termination with SIGTERM; on Windows, termination remains forceful. Unsaved work may still be lost. Individual and bulk termination require a separate `y` confirmation within eight seconds and recheck process identity and ownership before acting. The program does not guarantee protection against every possible PID race. If ownership cannot be established, termination is refused.
 
 The table adapts to 50-column terminals (status is hidden at narrow widths), and mouse clicks can select rows.
 

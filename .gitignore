@@ -49,3 +49,6 @@ Temporary Items
 
 # Application specific
 Idlekiller.app/
+
+# Local agent/session state
+.omo/

@@ -1,10 +1,12 @@
-use crate::app::{App, SortColumn, SortDirection};
+use crate::app::{App, SortColumn, SortDirection, is_display_safe};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Clear, LineGauge, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Cell, Clear, LineGauge, Paragraph, Row, Table, TableState, Wrap,
+    },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -65,7 +67,7 @@ pub const COL_MEM_WIDTH: u16 = 15;
 
 fn clean_name(name: &str) -> String {
     // strip control chars to prevent terminal escape injection
-    let clean: String = name.chars().filter(|c| !c.is_control()).collect();
+    let clean: String = name.chars().filter(|&c| is_display_safe(c)).collect();
     // char count avoids panic on multi-byte boundary
     if clean.chars().count() > 80 {
         format!("{}…", clean.chars().take(79).collect::<String>())
@@ -90,7 +92,11 @@ fn table_columns(width: u16) -> Vec<(SortColumn, u16)> {
             (SortColumn::Memory, 12),
         ]
     } else {
-        let name = width.saturating_sub(2 + COL_PID_WIDTH + COL_STATUS_WIDTH + COL_CPU_WIDTH + COL_MEM_WIDTH + 4).max(1);
+        let name = width
+            .saturating_sub(
+                2 + COL_PID_WIDTH + COL_STATUS_WIDTH + COL_CPU_WIDTH + COL_MEM_WIDTH + 4,
+            )
+            .max(1);
         vec![
             (SortColumn::Pid, COL_PID_WIDTH),
             (SortColumn::Name, name),
@@ -103,7 +109,9 @@ fn table_columns(width: u16) -> Vec<(SortColumn, u16)> {
 
 pub fn handle_header_click(app: &mut App, col_x: u16, row_y: u16, term_width: u16) {
     let header_y = HEADER_AREA_HEIGHT + STATS_AREA_HEIGHT + 1;
-    if row_y != header_y || col_x == 0 { return; }
+    if row_y != header_y || col_x == 0 {
+        return;
+    }
     let mut x = 1u16; // table border
     for (column, width) in table_columns(term_width) {
         if col_x >= x && col_x < x.saturating_add(width) {
@@ -119,7 +127,9 @@ pub fn handle_process_click(app: &mut App, row_y: u16, term_height: u16) {
     let table_top = HEADER_AREA_HEIGHT + STATS_AREA_HEIGHT;
     let table_height = term_height.saturating_sub(HEADER_AREA_HEIGHT + STATS_AREA_HEIGHT + 3);
     let first_row_y = table_top + 3; // top border + header + header margin
-    if row_y < first_row_y || row_y >= table_top + table_height.saturating_sub(1) { return; }
+    if row_y < first_row_y || row_y >= table_top + table_height.saturating_sub(1) {
+        return;
+    }
     let index = app.table_state.offset() + usize::from(row_y - first_row_y);
     if index < app.processes.len() {
         app.cancel_pending_kills();
@@ -159,7 +169,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_action_report(f: &mut Frame, app: &App) {
-    let Some(report) = app.action_report() else { return; };
+    let Some(report) = app.action_report() else {
+        return;
+    };
     let area = f.area();
     let width = area.width.saturating_sub(4).min(72);
     let height = (report.outcomes.len() as u16 + 8).min(area.height);
@@ -171,8 +183,10 @@ fn draw_action_report(f: &mut Frame, app: &App) {
     );
     let mut lines = vec![
         format!("Signal requests: {} / {}", report.requested, report.total),
-        format!("Missing: {}  Changed: {}  Denied: {}  Failed: {}",
-            report.missing, report.changed, report.denied, report.failed),
+        format!(
+            "Missing: {}  Changed: {}  Denied: {}  Failed: {}",
+            report.missing, report.changed, report.denied, report.failed
+        ),
     ];
     for (pid, result) in &report.outcomes {
         lines.push(format!("PID {pid}: {result}"));
@@ -181,13 +195,20 @@ fn draw_action_report(f: &mut Frame, app: &App) {
     if skipped > 0 {
         lines.push(format!("Not attempted: {skipped}"));
     }
-    if report.expired { lines.push("Confirmation expired / worker timed out".to_string()); }
+    if report.expired {
+        lines.push("Confirmation expired / worker timed out".to_string());
+    }
     lines.push(String::new());
     lines.push("Signal requested does NOT prove exit.".to_string());
     lines.push("Press any key to close this report.".to_string());
     let paragraph = Paragraph::new(lines.join("\n"))
-        .block(Block::default().borders(Borders::ALL).border_type(BorderType::Thick)
-            .border_style(Style::default().fg(C_AMBER)).title(" TERMINATION RESULT "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Thick)
+                .border_style(Style::default().fg(C_AMBER))
+                .title(" TERMINATION RESULT "),
+        )
         .wrap(Wrap { trim: false });
     f.render_widget(Clear, dialog);
     f.render_widget(paragraph, dialog);
@@ -196,10 +217,12 @@ fn draw_action_report(f: &mut Frame, app: &App) {
 /// Confirmation remains readable on narrower screens, instead of relying on a
 /// single footer line that may clip the names and the actual action.
 fn draw_confirmation(f: &mut Frame, app: &App) {
-    if !app.has_pending_kills() { return; }
+    if !app.has_pending_kills() {
+        return;
+    }
     let area = f.area();
     let width = area.width.saturating_sub(4).min(78);
-    let height = (app.confirmation_target_lines().len() as u16 + 6).min(area.height);
+    let height = (app.confirmation_target_lines().len() as u16 + 7).min(area.height);
     let dialog = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
@@ -210,16 +233,22 @@ fn draw_confirmation(f: &mut Frame, app: &App) {
     lines.extend(app.confirmation_target_lines());
     lines.push(String::new());
     lines.push("Unsaved work can be lost.".to_string());
-    lines.push("Same key within 8s confirms. Esc cancels.".to_string());
+    if cfg!(windows) {
+        lines.push("Windows: the process is ended forcefully.".to_string());
+    }
+    lines.push("Press y within 8s to confirm. Any other key cancels.".to_string());
     let paragraph = Paragraph::new(lines.join("\n"))
-        .block(Block::default().borders(Borders::ALL).border_type(BorderType::Thick)
-            .border_style(Style::default().fg(C_AMBER))
-            .title(" CONFIRM TERMINATION "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Thick)
+                .border_style(Style::default().fg(C_AMBER))
+                .title(" CONFIRM TERMINATION "),
+        )
         .wrap(Wrap { trim: false });
     f.render_widget(Clear, dialog);
     f.render_widget(paragraph, dialog);
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Header — commercial branding with version tag
@@ -399,14 +428,33 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
             SortColumn::Name => "NAME",
             SortColumn::Status => "STATUS",
             SortColumn::Cpu => "CPU %",
-            SortColumn::Memory => if area.width < 72 { "MEM" } else { "MEM (MB)" },
+            SortColumn::Memory => {
+                if area.width < 72 {
+                    "MEM"
+                } else {
+                    "MEM (MB)"
+                }
+            }
         };
         let indicator = if app.sort_column == *col {
-            match app.sort_direction { SortDirection::Asc => " ▲", SortDirection::Desc => " ▼" }
-        } else { "" };
-        let foreground = if app.sort_column == *col { C_ICE } else { C_SILVER };
-        Cell::from(format!("{label}{indicator}"))
-            .style(Style::default().fg(foreground).bg(C_ELEVATED).add_modifier(Modifier::BOLD))
+            match app.sort_direction {
+                SortDirection::Asc => " ▲",
+                SortDirection::Desc => " ▼",
+            }
+        } else {
+            ""
+        };
+        let foreground = if app.sort_column == *col {
+            C_ICE
+        } else {
+            C_SILVER
+        };
+        Cell::from(format!("{label}{indicator}")).style(
+            Style::default()
+                .fg(foreground)
+                .bg(C_ELEVATED)
+                .add_modifier(Modifier::BOLD),
+        )
     });
     let header = Row::new(header_cells)
         .style(Style::default().bg(C_ELEVATED))
@@ -418,73 +466,120 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
     let count = app.processes.len();
     let visible_rows = usize::from(area.height.saturating_sub(4)).max(1);
     let selected = app.table_state.selected().filter(|&n| n < count);
-    let mut first = app.table_state.offset().min(count.saturating_sub(visible_rows));
+    let mut first = app
+        .table_state
+        .offset()
+        .min(count.saturating_sub(visible_rows));
     if let Some(index) = selected {
-        if index < first { first = index; }
+        if index < first {
+            first = index;
+        }
         if index >= first.saturating_add(visible_rows) {
             first = index + 1 - visible_rows;
         }
     }
     let end = first.saturating_add(visible_rows).min(count);
-    let rows: Vec<Row> = app.processes[first..end].iter().map(|&index| {
-        let p = app.process_info_from_snapshot(index);
-        let candidate = p.candidate;
-        let idle = p.cpu < crate::app::IDLE_CPU_THRESHOLD
-            && matches!(p.status, "Sleeping" | "Idle");
-        let (status_label, status_color) = match p.status {
-            "Running" => ("● Run", C_PHOS),
-            "Sleeping" => ("○ Sleep", C_STEEL),
-            "Idle" => ("· Idle", C_DIM_TXT),
-            "Zombie" => ("✖ Zombie", C_CORAL),
-            "Stopped" => ("■ Stop", C_STEEL),
-            _ => ("? Other", C_DIM_TXT),
-        };
-        let cpu_color = if p.cpu > 80.0 { C_CORAL }
-            else if p.cpu > 50.0 { C_AMBER }
-            else if p.cpu > 1.0 { C_TECH }
-            else { C_DIM_TXT };
-        let mem_color = if candidate { C_AMBER }
-            else if p.mem_mb > 1000.0 { C_TECH }
-            else { C_DIM_TXT };
-        let name_color = if candidate { C_AMBER }
-            else if !p.can_terminate || idle { C_DIM_TXT }
-            else { C_TEXT };
-        let prefix = if candidate { "⚠ " }
-            else if !p.can_terminate { "· " }
-            else { "  " };
-        let cells: Vec<Cell> = columns.iter().map(|(col, _)| match col {
-            SortColumn::Pid => Cell::from(format!("{:>6}", p.pid))
-                .style(Style::default().fg(C_STEEL)),
-            SortColumn::Name => Cell::from(format!("{}{}", prefix, clean_name(&p.name)))
-                .style(Style::default().fg(name_color)),
-            SortColumn::Status => Cell::from(status_label)
-                .style(Style::default().fg(status_color)),
-            SortColumn::Cpu => Cell::from(format!("{:>6.1}%", p.cpu))
-                .style(Style::default().fg(cpu_color)),
-            SortColumn::Memory => Cell::from(format!("{:>7.1}MB", p.mem_mb))
-                .style(Style::default().fg(mem_color)),
-        }).collect();
-        Row::new(cells)
-    }).collect();
+    let rows: Vec<Row> = app.processes[first..end]
+        .iter()
+        .map(|&index| {
+            let p = app.process_info_from_snapshot(index);
+            let candidate = p.candidate;
+            let idle =
+                p.cpu < crate::app::IDLE_CPU_THRESHOLD && matches!(p.status, "Sleeping" | "Idle");
+            let (status_label, status_color) = match p.status {
+                "Running" => ("● Run", C_PHOS),
+                "Sleeping" => ("○ Sleep", C_STEEL),
+                "Idle" => ("· Idle", C_DIM_TXT),
+                "Zombie" => ("✖ Zombie", C_CORAL),
+                "Stopped" => ("■ Stop", C_STEEL),
+                _ => ("? Other", C_DIM_TXT),
+            };
+            let cpu_color = if p.cpu > 80.0 {
+                C_CORAL
+            } else if p.cpu > 50.0 {
+                C_AMBER
+            } else if p.cpu > 1.0 {
+                C_TECH
+            } else {
+                C_DIM_TXT
+            };
+            let mem_color = if candidate {
+                C_AMBER
+            } else if p.mem_mb > 1000.0 {
+                C_TECH
+            } else {
+                C_DIM_TXT
+            };
+            let name_color = if candidate {
+                C_AMBER
+            } else if !p.can_terminate || idle {
+                C_DIM_TXT
+            } else {
+                C_TEXT
+            };
+            let prefix = if candidate {
+                "⚠ "
+            } else if !p.can_terminate {
+                "· "
+            } else {
+                "  "
+            };
+            let cells: Vec<Cell> = columns
+                .iter()
+                .map(|(col, _)| match col {
+                    SortColumn::Pid => {
+                        Cell::from(format!("{:>6}", p.pid)).style(Style::default().fg(C_STEEL))
+                    }
+                    SortColumn::Name => Cell::from(format!("{}{}", prefix, clean_name(&p.name)))
+                        .style(Style::default().fg(name_color)),
+                    SortColumn::Status => {
+                        Cell::from(status_label).style(Style::default().fg(status_color))
+                    }
+                    SortColumn::Cpu => {
+                        Cell::from(format!("{:>6.1}%", p.cpu)).style(Style::default().fg(cpu_color))
+                    }
+                    SortColumn::Memory => Cell::from(format!("{:>7.1}MB", p.mem_mb))
+                        .style(Style::default().fg(mem_color)),
+                })
+                .collect();
+            Row::new(cells)
+        })
+        .collect();
 
     let title = Line::from(vec![
-        Span::styled(" PROCESSES", Style::default().fg(C_SILVER).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " PROCESSES",
+            Style::default().fg(C_SILVER).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!("  {count} tasks "), Style::default().fg(C_STEEL)),
     ]);
-    let constraints: Vec<Constraint> = columns.iter()
-        .map(|(_, width)| Constraint::Length(*width)).collect();
+    let constraints: Vec<Constraint> = columns
+        .iter()
+        .map(|(_, width)| Constraint::Length(*width))
+        .collect();
     let table = Table::new(rows, constraints)
         .header(header)
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(C_SLATE_MID))
-            .title(title))
-        .row_highlight_style(Style::default().bg(C_SEL_BG).fg(C_ICE).add_modifier(Modifier::BOLD))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(C_SLATE_MID))
+                .title(title),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(C_SEL_BG)
+                .fg(C_ICE)
+                .add_modifier(Modifier::BOLD),
+        )
         .column_spacing(1);
 
     let mut viewport_state = TableState::default();
-    viewport_state.select(selected.filter(|&i| i >= first && i < end).map(|i| i - first));
+    viewport_state.select(
+        selected
+            .filter(|&i| i >= first && i < end)
+            .map(|i| i - first),
+    );
     f.render_stateful_widget(table, area, &mut viewport_state);
     *app.table_state.offset_mut() = first + viewport_state.offset();
 }
@@ -498,7 +593,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         let safe_q: String = app
             .search_query
             .chars()
-            .filter(|c| !c.is_control())
+            .filter(|&c| is_display_safe(c))
             .collect();
         (
             Line::from(vec![
@@ -529,13 +624,19 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         };
         (
             Line::from(vec![
-                Span::styled(" ! ", Style::default().fg(C_ABYSS).bg(C_AMBER).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " ! ",
+                    Style::default()
+                        .fg(C_ABYSS)
+                        .bg(C_AMBER)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(warning, Style::default().fg(C_TEXT)),
             ]),
             C_AMBER,
         )
     } else if let Some(ref msg) = app.message {
-        let safe_msg: String = msg.chars().filter(|c| !c.is_control()).collect();
+        let safe_msg: String = msg.chars().filter(|&c| is_display_safe(c)).collect();
         (
             Line::from(vec![
                 // Neutral information icon: a refusal or error is not a success.
@@ -559,10 +660,10 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
                 act("Nav"),
                 vsep(),
                 kbd("Enter"),
-                act("Confirm Kill"),
+                act("Kill (then y)"),
                 vsep(),
                 kbd("K"),
-                act("Review Cleanup"),
+                act("Cleanup (then y)"),
                 // Search group
                 Span::styled("  │  ", Style::default().fg(C_SLATE_MID)),
                 kbd("f"),
@@ -627,8 +728,8 @@ mod tests {
     fn compact_and_full_columns_fit_the_terminal() {
         for width in [50, 60, 71, 72, 80, 120] {
             let columns = table_columns(width);
-            let consumed = columns.iter().map(|(_, w)| usize::from(*w)).sum::<usize>()
-                + columns.len() - 1 + 2;
+            let consumed =
+                columns.iter().map(|(_, w)| usize::from(*w)).sum::<usize>() + columns.len() - 1 + 2;
             assert_eq!(consumed, usize::from(width), "width {width}");
             assert!(columns.iter().any(|(c, _)| *c == SortColumn::Name));
         }
@@ -640,7 +741,9 @@ mod tests {
             let backend = ratatui::backend::TestBackend::new(width, height);
             let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
             let mut app = App::new_for_test();
-            terminal.draw(|frame| draw(frame, &mut app)).expect("render without panic");
+            terminal
+                .draw(|frame| draw(frame, &mut app))
+                .expect("render without panic");
         }
     }
 }

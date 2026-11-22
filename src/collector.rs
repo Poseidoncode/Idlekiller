@@ -3,13 +3,18 @@
 //! so a slow terminal cannot cause an unbounded queue of outdated snapshots.
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, mpsc::{self, Receiver, SyncSender, TrySendError}},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+    },
     thread,
     time::{Duration, Instant},
 };
-use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, Uid, UpdateKind};
+use sysinfo::{
+    Pid, Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, Uid, UpdateKind,
+};
 
-use crate::app::{ProcessIdentity, ProcessInfo, SystemStats, IDLE_CPU_THRESHOLD, WASTEFUL_MEM_MB};
+use crate::app::{IDLE_CPU_THRESHOLD, ProcessIdentity, ProcessInfo, SystemStats, WASTEFUL_MEM_MB};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const ACTION_MAX_AGE: Duration = Duration::from_secs(8);
@@ -52,8 +57,14 @@ impl TerminationReport {
         let remainder = self.total.saturating_sub(attempted);
         format!(
             "Signals: {}/{}; missing: {}, changed: {}, denied: {}, failed: {}, not attempted: {}{} (not exit confirmation)",
-            self.requested, self.total, self.missing, self.changed, self.denied, self.failed,
-            remainder, if self.expired { " [timed out]" } else { "" }
+            self.requested,
+            self.total,
+            self.missing,
+            self.changed,
+            self.denied,
+            self.failed,
+            remainder,
+            if self.expired { " [timed out]" } else { "" }
         )
     }
 }
@@ -78,6 +89,9 @@ struct InspectedProcess {
     sleeping: bool,
     memory_mb: f64,
     eligible_in_recent_sample: bool,
+    /// The terminal/IDE/shell hosting this program must never be a target,
+    /// whatever its name is (a name list cannot know every terminal emulator).
+    own_ancestor: bool,
 }
 
 trait ProcessSource: Send + 'static {
@@ -89,12 +103,19 @@ trait ProcessSource: Send + 'static {
 }
 
 /// This policy is reused by fake-source tests; no test sends a real signal.
-fn terminate_checked(source: &mut impl ProcessSource, target: &ProcessIdentity, bulk: bool) -> Result<(), Denial> {
+fn terminate_checked(
+    source: &mut impl ProcessSource,
+    target: &ProcessIdentity,
+    bulk: bool,
+) -> Result<(), Denial> {
     let own = source.own_pid().ok_or(Denial::UnverifiedOwner)?;
     if target.pid == own || target.pid.as_u32() <= 2 || is_protected_name(&target.name) {
         return Err(Denial::Protected);
     }
-    let user = source.current_user().cloned().ok_or(Denial::UnverifiedOwner)?;
+    let user = source
+        .current_user()
+        .cloned()
+        .ok_or(Denial::UnverifiedOwner)?;
     if bulk && is_superuser(&user) {
         return Err(Denial::Protected);
     }
@@ -102,22 +123,32 @@ fn terminate_checked(source: &mut impl ProcessSource, target: &ProcessIdentity, 
     if observed.identity != *target {
         return Err(Denial::IdentityChanged);
     }
-    if observed.kernel_thread || is_protected_name(&observed.identity.name) {
+    if observed.kernel_thread || observed.own_ancestor || is_protected_name(&observed.identity.name)
+    {
         return Err(Denial::Protected);
     }
     if observed.effective_user.as_ref() != Some(&user) {
         return Err(Denial::UnverifiedOwner);
     }
-    if bulk && !(observed.eligible_in_recent_sample
-        && observed.sleeping
-        && observed.memory_mb > WASTEFUL_MEM_MB) {
+    if bulk
+        && !(observed.eligible_in_recent_sample
+            && observed.sleeping
+            && observed.memory_mb > WASTEFUL_MEM_MB)
+    {
         return Err(Denial::NoLongerEligible);
     }
-    if source.signal(target) { Ok(()) } else { Err(Denial::SignalFailed) }
+    if source.signal(target) {
+        Ok(())
+    } else {
+        Err(Denial::SignalFailed)
+    }
 }
 
 fn execute_command(source: &mut impl ProcessSource, cmd: TerminateCommand) -> TerminationReport {
-    let mut report = TerminationReport { total: cmd.targets.len(), ..TerminationReport::default() };
+    let mut report = TerminationReport {
+        total: cmd.targets.len(),
+        ..TerminationReport::default()
+    };
     // The OS scan can take arbitrarily long. Expired commands must not execute.
     if cmd.confirmed_at.elapsed() >= ACTION_MAX_AGE {
         report.expired = true;
@@ -129,13 +160,34 @@ fn execute_command(source: &mut impl ProcessSource, cmd: TerminateCommand) -> Te
             break;
         }
         let status = match terminate_checked(source, &target, cmd.bulk) {
-            Ok(()) => { report.requested += 1; "signal requested" },
-            Err(Denial::Missing) => { report.missing += 1; "no longer present" },
-            Err(Denial::IdentityChanged) => { report.changed += 1; "identity changed" },
-            Err(Denial::SignalFailed) => { report.failed += 1; "signal failed" },
-            Err(Denial::UnverifiedOwner) => { report.denied += 1; "owner unverified" },
-            Err(Denial::Protected) => { report.denied += 1; "protected" },
-            Err(Denial::NoLongerEligible) => { report.denied += 1; "no longer eligible" },
+            Ok(()) => {
+                report.requested += 1;
+                "signal requested"
+            }
+            Err(Denial::Missing) => {
+                report.missing += 1;
+                "no longer present"
+            }
+            Err(Denial::IdentityChanged) => {
+                report.changed += 1;
+                "identity changed"
+            }
+            Err(Denial::SignalFailed) => {
+                report.failed += 1;
+                "signal failed"
+            }
+            Err(Denial::UnverifiedOwner) => {
+                report.denied += 1;
+                "owner unverified"
+            }
+            Err(Denial::Protected) => {
+                report.denied += 1;
+                "protected"
+            }
+            Err(Denial::NoLongerEligible) => {
+                report.denied += 1;
+                "no longer eligible"
+            }
         };
         report.outcomes.push((target.pid, status));
     }
@@ -160,7 +212,27 @@ impl WorkerHandle {
         let (result_tx, result_rx) = mpsc::channel();
         drop(command_rx);
         drop(result_tx);
-        Self { slot: Arc::new(Mutex::new(None)), command_tx, result_rx }
+        Self {
+            slot: Arc::new(Mutex::new(None)),
+            command_tx,
+            result_rx,
+        }
+    }
+
+    /// Handle whose submitted commands can be observed, for confirmation-flow tests.
+    #[cfg(test)]
+    pub(crate) fn with_command_sink() -> (Self, Receiver<TerminateCommand>) {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::channel();
+        std::mem::forget(result_tx); // keep the result channel connected
+        (
+            Self {
+                slot: Arc::new(Mutex::new(None)),
+                command_tx,
+                result_rx,
+            },
+            command_rx,
+        )
     }
 
     pub(crate) fn start() -> Self {
@@ -179,7 +251,9 @@ impl WorkerHandle {
                 let snapshot = source.collect();
                 if let Ok(mut latest) = worker_slot.lock() {
                     *latest = Some(snapshot); // replace an unconsumed stale snapshot
-                } else { break; }
+                } else {
+                    break;
+                }
 
                 // Do not append an extra whole second to the scan duration.
                 // When collection exceeds the interval, check the command
@@ -200,12 +274,18 @@ impl WorkerHandle {
                 };
                 if let Some(cmd) = command {
                     let result = execute_command(&mut source, cmd);
-                    if result_tx.send(result).is_err() { return; }
+                    if result_tx.send(result).is_err() {
+                        return;
+                    }
                     // A completed termination triggers the next scan immediately.
                 }
             }
         });
-        Self { slot, command_tx, result_rx }
+        Self {
+            slot,
+            command_tx,
+            result_rx,
+        }
     }
 
     pub(crate) fn latest(&self) -> Option<Snapshot> {
@@ -234,6 +314,8 @@ struct SysinfoSource {
     consecutive: HashMap<(Pid, u64), u8>,
     recently_eligible: HashSet<(Pid, u64)>,
     sampled_at: Option<Instant>,
+    /// Parent chain of this process, rebuilt on every full scan.
+    ancestors: HashSet<Pid>,
 }
 
 impl SysinfoSource {
@@ -247,6 +329,25 @@ impl SysinfoSource {
             consecutive: HashMap::new(),
             recently_eligible: HashSet::new(),
             sampled_at: None,
+            ancestors: HashSet::new(),
+        }
+    }
+
+    fn refresh_ancestors(&mut self) {
+        self.ancestors.clear();
+        let mut current = self.own;
+        // Bounded walk: a corrupted parent loop must not hang the worker.
+        for _ in 0..64 {
+            let Some(parent) = current
+                .and_then(|pid| self.sys.process(pid))
+                .and_then(|p| p.parent())
+            else {
+                break;
+            };
+            if !self.ancestors.insert(parent) {
+                break;
+            }
+            current = Some(parent);
         }
     }
 }
@@ -257,17 +358,25 @@ impl ProcessSource for SysinfoSource {
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::nothing().with_cpu().with_memory()
-                .with_user(UpdateKind::OnlyIfNotSet).without_tasks(),
+            ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory()
+                .with_user(UpdateKind::OnlyIfNotSet)
+                .without_tasks(),
         );
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         if self.uid.is_none() {
-            self.uid = self.own.and_then(|pid| self.sys.process(pid))
+            self.uid = self
+                .own
+                .and_then(|pid| self.sys.process(pid))
                 .and_then(|p| verified_user_id(p).cloned());
         }
+        self.refresh_ancestors();
         let at = Instant::now();
-        let spaced = self.previous_sample_at.is_none_or(|previous| at.saturating_duration_since(previous) >= MIN_CPU_INTERVAL);
+        let spaced = self
+            .previous_sample_at
+            .is_none_or(|previous| at.saturating_duration_since(previous) >= MIN_CPU_INTERVAL);
         if spaced {
             self.sample_count = self.sample_count.saturating_add(1);
             self.previous_sample_at = Some(at);
@@ -276,35 +385,59 @@ impl ProcessSource for SysinfoSource {
         let privileged_user = self.uid.as_ref().is_some_and(is_superuser);
         let mut next = HashMap::with_capacity(self.sys.processes().len());
         let mut eligible = HashSet::new();
-        let entries = self.sys.processes().iter().map(|(&pid, process)| {
-            let name = process.name().to_string_lossy().into_owned();
-            let name_lower = name.to_lowercase();
-            let key = (pid, process.start_time());
-            let can_terminate = !is_protected_pid(pid) && Some(pid) != self.own
-                && !is_kernel_thread(process) && !is_protected_lower(&name_lower)
-                && self.uid.as_ref().is_some_and(|uid| verified_user_id(process) == Some(uid));
-            let eligible_now = cpu_ready && process.cpu_usage().is_finite()
-                && process.cpu_usage() < IDLE_CPU_THRESHOLD
-                && is_sleeping(process.status()) && (process.memory() as f64 / 1_048_576.0) > WASTEFUL_MEM_MB
-                && can_terminate && !privileged_user;
-            let streak = next_streak(
-                self.consecutive.get(&key).copied().unwrap_or(0), spaced, eligible_now
-            );
-            if streak > 0 { next.insert(key, streak); }
-            let candidate = eligible_now && streak >= REQUIRED_IDLE_SAMPLES;
-            if candidate { eligible.insert(key); }
-            ProcessInfo {
-                pid,
-                name_lower,
-                name,
-                cpu: if process.cpu_usage().is_finite() { process.cpu_usage().max(0.0) } else { 0.0 },
-                mem_mb: process.memory() as f64 / 1_048_576.0,
-                status: status_label(process.status()),
-                start_time: process.start_time(),
-                candidate,
-                can_terminate,
-            }
-        }).collect();
+        let entries = self
+            .sys
+            .processes()
+            .iter()
+            .map(|(&pid, process)| {
+                let name = process.name().to_string_lossy().into_owned();
+                let name_lower = name.to_lowercase();
+                let key = (pid, process.start_time());
+                let can_terminate = !is_protected_pid(pid)
+                    && Some(pid) != self.own
+                    && !self.ancestors.contains(&pid)
+                    && !is_kernel_thread(process)
+                    && !is_protected_lower(&name_lower)
+                    && self
+                        .uid
+                        .as_ref()
+                        .is_some_and(|uid| verified_user_id(process) == Some(uid));
+                let eligible_now = cpu_ready
+                    && process.cpu_usage().is_finite()
+                    && process.cpu_usage() < IDLE_CPU_THRESHOLD
+                    && is_sleeping(process.status())
+                    && (process.memory() as f64 / 1_048_576.0) > WASTEFUL_MEM_MB
+                    && can_terminate
+                    && !privileged_user;
+                let streak = next_streak(
+                    self.consecutive.get(&key).copied().unwrap_or(0),
+                    spaced,
+                    eligible_now,
+                );
+                if streak > 0 {
+                    next.insert(key, streak);
+                }
+                let candidate = eligible_now && streak >= REQUIRED_IDLE_SAMPLES;
+                if candidate {
+                    eligible.insert(key);
+                }
+                ProcessInfo {
+                    pid,
+                    name_lower,
+                    name,
+                    cpu: if process.cpu_usage().is_finite() {
+                        process.cpu_usage().max(0.0)
+                    } else {
+                        0.0
+                    },
+                    mem_mb: process.memory() as f64 / 1_048_576.0,
+                    status: status_label(process.status()),
+                    start_time: process.start_time(),
+                    candidate,
+                    can_terminate,
+                }
+            })
+            .collect();
         self.consecutive = next;
         self.recently_eligible = eligible;
         self.sampled_at = Some(at);
@@ -314,11 +447,14 @@ impl ProcessSource for SysinfoSource {
             stats: SystemStats {
                 cpu_usage: if self.sys.global_cpu_usage().is_finite() {
                     self.sys.global_cpu_usage().max(0.0)
-                } else { 0.0 },
+                } else {
+                    0.0
+                },
                 ram_used_mb: self.sys.used_memory() as f64 / 1_048_576.0,
                 ram_total_mb: self.sys.total_memory() as f64 / 1_048_576.0,
                 uptime_seconds,
-                scan_duration_ms: u64::try_from(scan_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                scan_duration_ms: u64::try_from(scan_start.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
             },
             own_pid: self.own,
             current_user: self.uid.clone(),
@@ -332,7 +468,10 @@ impl ProcessSource for SysinfoSource {
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
-            ProcessRefreshKind::nothing().with_memory().with_user(UpdateKind::Always).without_tasks(),
+            ProcessRefreshKind::nothing()
+                .with_memory()
+                .with_user(UpdateKind::Always)
+                .without_tasks(),
         );
         let process = self.sys.process(pid)?;
         let key = (pid, process.start_time());
@@ -344,9 +483,12 @@ impl ProcessSource for SysinfoSource {
             },
             effective_user: verified_user_id(process).cloned(),
             kernel_thread: is_kernel_thread(process),
+            own_ancestor: self.ancestors.contains(&pid),
             sleeping: is_sleeping(process.status()),
             memory_mb: process.memory() as f64 / 1_048_576.0,
-            eligible_in_recent_sample: self.sampled_at.is_some_and(|at| at.elapsed() < SNAPSHOT_MAX_AGE)
+            eligible_in_recent_sample: self
+                .sampled_at
+                .is_some_and(|at| at.elapsed() < SNAPSHOT_MAX_AGE)
                 && self.recently_eligible.contains(&key),
         })
     }
@@ -358,14 +500,22 @@ impl ProcessSource for SysinfoSource {
         })
     }
 
-    fn own_pid(&self) -> Option<Pid> { self.own }
-    fn current_user(&self) -> Option<&Uid> { self.uid.as_ref() }
+    fn own_pid(&self) -> Option<Pid> {
+        self.own
+    }
+    fn current_user(&self) -> Option<&Uid> {
+        self.uid.as_ref()
+    }
 }
 
 fn next_streak(previous: u8, spaced: bool, eligible: bool) -> u8 {
-    if !spaced { previous }
-    else if eligible { previous.saturating_add(1) }
-    else { 0 }
+    if !spaced {
+        previous
+    } else if eligible {
+        previous.saturating_add(1)
+    } else {
+        0
+    }
 }
 
 fn status_label(status: ProcessStatus) -> &'static str {
@@ -379,16 +529,25 @@ fn status_label(status: ProcessStatus) -> &'static str {
     }
 }
 fn is_sleeping(status: ProcessStatus) -> bool {
-    matches!(status, ProcessStatus::Sleep | ProcessStatus::Idle | ProcessStatus::Parked)
+    matches!(
+        status,
+        ProcessStatus::Sleep | ProcessStatus::Idle | ProcessStatus::Parked
+    )
 }
-fn is_protected_pid(pid: Pid) -> bool { pid.as_u32() <= 2 }
+fn is_protected_pid(pid: Pid) -> bool {
+    pid.as_u32() <= 2
+}
 /// `effective_user_id` is unavailable on Windows; `user_id` is the
 /// best available identity there. Unknown IDs still fail closed.
 fn verified_user_id(process: &Process) -> Option<&Uid> {
     #[cfg(windows)]
-    { process.user_id() }
+    {
+        process.user_id()
+    }
     #[cfg(not(windows))]
-    { process.effective_user_id() }
+    {
+        process.effective_user_id()
+    }
 }
 fn is_kernel_thread(process: &Process) -> bool {
     let name = process.name().to_string_lossy();
@@ -413,19 +572,100 @@ fn is_superuser(uid: &Uid) -> bool {
 }
 
 const PROTECTED_NAMES: &[&str] = &[
-    "kernel", "init", "system", "systemd", "launchd", "svchost", "csrss", "wininit",
-    "smss", "winlogon", "services", "lsass", "dwm", "audiodg", "spoolsv",
-    "taskhost", "dllhost", "fontdrvhost", "searchindexer", "securityhealthservice",
-    "waasmedic", "wermgr", "msmpeng", "loginwindow", "windowserver", "dock", "finder",
-    "alacritty", "wezterm", "kitty", "konsole", "gnome-shell", "kwin", "plasmashell",
-    "xfwm4", "i3", "sway", "explorer", "powershell", "pwsh", "cmd", "sh", "bash",
-    "zsh", "fish", "nu", "dash", "elvish", "xonsh", "ssh", "sshd", "scp", "sftp",
-    "mosh", "tmux", "screen", "docker", "dockerd", "containerd", "podman",
-    "dbus", "pipewire", "wireplumber", "pulseaudio", "cron", "terminal",
-    "windowsterminal", "iterm2", "iterm", "hyper", "tabby", "xterm", "foot", "chrome",
-    "google chrome", "firefox", "safari", "msedge", "edge", "code", "code-oss",
-    "vim", "nvim", "neovide", "emacs", "xcode", "notes", "notion", "discord",
-    "slack", "teams", "wechat", "telegram", "spotify",
+    "kernel",
+    "init",
+    "system",
+    "systemd",
+    "launchd",
+    "svchost",
+    "csrss",
+    "wininit",
+    "smss",
+    "winlogon",
+    "services",
+    "lsass",
+    "dwm",
+    "audiodg",
+    "spoolsv",
+    "taskhost",
+    "dllhost",
+    "fontdrvhost",
+    "searchindexer",
+    "securityhealthservice",
+    "waasmedic",
+    "wermgr",
+    "msmpeng",
+    "loginwindow",
+    "windowserver",
+    "dock",
+    "finder",
+    "alacritty",
+    "wezterm",
+    "kitty",
+    "konsole",
+    "gnome-shell",
+    "kwin",
+    "plasmashell",
+    "xfwm4",
+    "i3",
+    "sway",
+    "explorer",
+    "powershell",
+    "pwsh",
+    "cmd",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "nu",
+    "dash",
+    "elvish",
+    "xonsh",
+    "ssh",
+    "sshd",
+    "scp",
+    "sftp",
+    "mosh",
+    "tmux",
+    "screen",
+    "docker",
+    "dockerd",
+    "containerd",
+    "podman",
+    "dbus",
+    "pipewire",
+    "wireplumber",
+    "pulseaudio",
+    "cron",
+    "terminal",
+    "windowsterminal",
+    "iterm2",
+    "iterm",
+    "hyper",
+    "tabby",
+    "xterm",
+    "foot",
+    "chrome",
+    "google chrome",
+    "firefox",
+    "safari",
+    "msedge",
+    "edge",
+    "code",
+    "code-oss",
+    "vim",
+    "nvim",
+    "neovide",
+    "emacs",
+    "xcode",
+    "notes",
+    "notion",
+    "discord",
+    "slack",
+    "teams",
+    "wechat",
+    "telegram",
+    "spotify",
 ];
 
 fn is_protected_name(name: &str) -> bool {
@@ -434,21 +674,29 @@ fn is_protected_name(name: &str) -> bool {
 fn is_protected_lower(lower: &str) -> bool {
     // Tokenize once per process rather than repeating a Unicode split for
     // every entry in the protected list on every snapshot.
-    if PROTECTED_NAMES.iter().any(|&name| name.contains(' ') && lower == name) {
+    if PROTECTED_NAMES
+        .iter()
+        .any(|&name| name.contains(' ') && lower == name)
+    {
         return true;
     }
     lower.split(|ch: char| !ch.is_alphanumeric()).any(|part| {
-        !part.is_empty() && PROTECTED_NAMES.iter().any(|&name| {
-            !name.contains(' ') && part == name
-        })
+        !part.is_empty()
+            && PROTECTED_NAMES
+                .iter()
+                .any(|&name| !name.contains(' ') && part == name)
     })
 }
 
 fn request_termination(process: &Process) -> bool {
     #[cfg(unix)]
-    { process.kill_with(sysinfo::Signal::Term).unwrap_or(false) }
+    {
+        process.kill_with(sysinfo::Signal::Term).unwrap_or(false)
+    }
     #[cfg(not(unix))]
-    { process.kill() }
+    {
+        process.kill()
+    }
 }
 
 #[cfg(test)]
@@ -462,11 +710,22 @@ mod tests {
         signals: usize,
     }
     impl ProcessSource for FakeSource {
-        fn collect(&mut self) -> Snapshot { panic!("not needed by fake") }
-        fn inspect(&mut self, _pid: Pid) -> Option<InspectedProcess> { self.found.clone() }
-        fn signal(&mut self, _identity: &ProcessIdentity) -> bool { self.signals += 1; true }
-        fn own_pid(&self) -> Option<Pid> { self.own }
-        fn current_user(&self) -> Option<&Uid> { self.user.as_ref() }
+        fn collect(&mut self) -> Snapshot {
+            panic!("not needed by fake")
+        }
+        fn inspect(&mut self, _pid: Pid) -> Option<InspectedProcess> {
+            self.found.clone()
+        }
+        fn signal(&mut self, _identity: &ProcessIdentity) -> bool {
+            self.signals += 1;
+            true
+        }
+        fn own_pid(&self) -> Option<Pid> {
+            self.own
+        }
+        fn current_user(&self) -> Option<&Uid> {
+            self.user.as_ref()
+        }
     }
     fn test_uid(alternate: bool) -> Uid {
         #[cfg(windows)]
@@ -476,7 +735,8 @@ mod tests {
                 "S-1-5-21-1-2-3-1001"
             } else {
                 "S-1-5-21-1-2-3-1000"
-            }).unwrap()
+            })
+            .unwrap()
         }
         #[cfg(not(windows))]
         {
@@ -484,12 +744,24 @@ mod tests {
         }
     }
     fn fixture() -> (FakeSource, ProcessIdentity) {
-        let target = ProcessIdentity {pid: Pid::from(54321usize), name: "test-harmless".into(), start_time: 100};
+        let target = ProcessIdentity {
+            pid: Pid::from(54321usize),
+            name: "test-harmless".into(),
+            start_time: 100,
+        };
         let user = test_uid(false);
         let src = FakeSource {
-            own: Some(Pid::from(999usize)), user: Some(user.clone()),
-            found: Some(InspectedProcess { identity: target.clone(), effective_user: Some(user),
-                kernel_thread: false, sleeping: true, memory_mb: 900.0, eligible_in_recent_sample: true }),
+            own: Some(Pid::from(999usize)),
+            user: Some(user.clone()),
+            found: Some(InspectedProcess {
+                identity: target.clone(),
+                effective_user: Some(user),
+                kernel_thread: false,
+                sleeping: true,
+                memory_mb: 900.0,
+                eligible_in_recent_sample: true,
+                own_ancestor: false,
+            }),
             signals: 0,
         };
         (src, target)
@@ -499,46 +771,103 @@ mod tests {
     fn pid_reused_different_start_time_never_signalled() {
         let (mut src, target) = fixture();
         src.found.as_mut().unwrap().identity.start_time = 101;
-        assert_eq!(terminate_checked(&mut src, &target, false), Err(Denial::IdentityChanged));
+        assert_eq!(
+            terminate_checked(&mut src, &target, false),
+            Err(Denial::IdentityChanged)
+        );
         assert_eq!(src.signals, 0);
     }
     #[test]
     fn pid_reused_different_name_never_signalled() {
         let (mut src, target) = fixture();
         src.found.as_mut().unwrap().identity.name = "other".into();
-        assert_eq!(terminate_checked(&mut src, &target, false), Err(Denial::IdentityChanged));
+        assert_eq!(
+            terminate_checked(&mut src, &target, false),
+            Err(Denial::IdentityChanged)
+        );
         assert_eq!(src.signals, 0);
     }
     #[test]
     fn ownership_unknown_or_different_never_signalled() {
         let (mut src, target) = fixture();
         src.found.as_mut().unwrap().effective_user = None;
-        assert_eq!(terminate_checked(&mut src, &target, false), Err(Denial::UnverifiedOwner));
+        assert_eq!(
+            terminate_checked(&mut src, &target, false),
+            Err(Denial::UnverifiedOwner)
+        );
         src.found.as_mut().unwrap().effective_user = Some(test_uid(true));
-        assert_eq!(terminate_checked(&mut src, &target, false), Err(Denial::UnverifiedOwner));
+        assert_eq!(
+            terminate_checked(&mut src, &target, false),
+            Err(Denial::UnverifiedOwner)
+        );
         src.user = None;
-        assert_eq!(terminate_checked(&mut src, &target, false), Err(Denial::UnverifiedOwner));
+        assert_eq!(
+            terminate_checked(&mut src, &target, false),
+            Err(Denial::UnverifiedOwner)
+        );
         assert_eq!(src.signals, 0);
     }
     #[test]
     fn missing_and_protected_never_signalled() {
         let (mut src, target) = fixture();
         src.found = None;
-        assert_eq!(terminate_checked(&mut src, &target, false), Err(Denial::Missing));
+        assert_eq!(
+            terminate_checked(&mut src, &target, false),
+            Err(Denial::Missing)
+        );
         let (mut src, target) = fixture();
         src.found.as_mut().unwrap().kernel_thread = true;
-        assert_eq!(terminate_checked(&mut src, &target, false), Err(Denial::Protected));
+        assert_eq!(
+            terminate_checked(&mut src, &target, false),
+            Err(Denial::Protected)
+        );
         assert_eq!(src.signals, 0);
     }
     #[test]
     fn bulk_requires_recent_stable_candidate() {
         let (mut src, target) = fixture();
         src.found.as_mut().unwrap().eligible_in_recent_sample = false;
-        assert_eq!(terminate_checked(&mut src, &target, true), Err(Denial::NoLongerEligible));
+        assert_eq!(
+            terminate_checked(&mut src, &target, true),
+            Err(Denial::NoLongerEligible)
+        );
         src.found.as_mut().unwrap().eligible_in_recent_sample = true;
         src.found.as_mut().unwrap().sleeping = false;
-        assert_eq!(terminate_checked(&mut src, &target, true), Err(Denial::NoLongerEligible));
+        assert_eq!(
+            terminate_checked(&mut src, &target, true),
+            Err(Denial::NoLongerEligible)
+        );
         assert_eq!(src.signals, 0);
+    }
+    #[test]
+    fn own_ancestor_is_never_signalled_even_with_an_unlisted_name() {
+        for bulk in [false, true] {
+            let (mut src, target) = fixture();
+            src.found.as_mut().unwrap().own_ancestor = true; // e.g. an unlisted terminal emulator
+            assert_eq!(
+                terminate_checked(&mut src, &target, bulk),
+                Err(Denial::Protected)
+            );
+            assert_eq!(src.signals, 0);
+        }
+    }
+    #[test]
+    fn real_scan_never_offers_own_parent_chain_for_termination() {
+        let mut source = SysinfoSource::new();
+        let snapshot = source.collect(); // read-only scan; sends no signal
+        let own = source.own.expect("own pid");
+        let parent = source
+            .sys
+            .process(own)
+            .and_then(|p| p.parent())
+            .expect("test process has a parent");
+        assert!(source.ancestors.contains(&parent));
+        let entry = snapshot
+            .entries
+            .iter()
+            .find(|e| e.pid == parent)
+            .expect("parent listed");
+        assert!(!entry.can_terminate && !entry.candidate);
     }
     #[test]
     fn only_matching_verified_target_can_receive_signal() {
@@ -550,10 +879,14 @@ mod tests {
     fn per_pid_report_shows_the_failure_reason_without_signalling() {
         let (mut src, target) = fixture();
         src.found = None;
-        let report = execute_command(&mut src, TerminateCommand {
-            targets: vec![target.clone()], bulk: false,
-            confirmed_at: Instant::now(),
-        });
+        let report = execute_command(
+            &mut src,
+            TerminateCommand {
+                targets: vec![target.clone()],
+                bulk: false,
+                confirmed_at: Instant::now(),
+            },
+        );
         assert_eq!(src.signals, 0);
         assert_eq!(report.missing, 1);
         assert_eq!(report.outcomes, vec![(target.pid, "no longer present")]);
@@ -562,10 +895,14 @@ mod tests {
     #[test]
     fn expired_confirmation_cannot_signal() {
         let (mut src, target) = fixture();
-        let result = execute_command(&mut src, TerminateCommand {
-            targets: vec![target], bulk: true,
-            confirmed_at: Instant::now() - Duration::from_secs(10),
-        });
+        let result = execute_command(
+            &mut src,
+            TerminateCommand {
+                targets: vec![target],
+                bulk: true,
+                confirmed_at: Instant::now() - Duration::from_secs(10),
+            },
+        );
         assert!(result.expired);
         assert_eq!(src.signals, 0);
     }
@@ -583,7 +920,12 @@ mod tests {
     }
     #[test]
     fn timeout_report_never_claims_zero_sent_if_partial() {
-        let report = TerminationReport { total: 3, requested: 1, expired: true, ..TerminationReport::default() };
+        let report = TerminationReport {
+            total: 3,
+            requested: 1,
+            expired: true,
+            ..TerminationReport::default()
+        };
         let message = report.message();
         assert!(message.contains("Signals: 1/3"));
         assert!(message.contains("not attempted: 2"));
@@ -602,9 +944,14 @@ mod tests {
     #[test]
     fn polling_interval_includes_scan_time_and_expires_safely() {
         let cycle = Instant::now();
-        assert_eq!(poll_remaining(cycle, cycle + Duration::from_millis(250)),
-            Duration::from_millis(750));
-        assert_eq!(poll_remaining(cycle, cycle + Duration::from_secs(2)), Duration::ZERO);
+        assert_eq!(
+            poll_remaining(cycle, cycle + Duration::from_millis(250)),
+            Duration::from_millis(750)
+        );
+        assert_eq!(
+            poll_remaining(cycle, cycle + Duration::from_secs(2)),
+            Duration::ZERO
+        );
     }
 
     #[test]

@@ -1,3 +1,0 @@
---- IdleKiller Logic Verification ---
-Target PID to kill: 8711
-FAILED TO FIND PROCESS
